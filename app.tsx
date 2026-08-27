@@ -352,6 +352,8 @@ function MachinesPage() {
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<MachineView | null>(null);
   const [vercelUrl, setVercelUrl] = useState<string | null>(null);
+  const [readyImages, setReadyImages] = useState<{ id: string; name: string }[]>([]);
+  const [defaultImageId, setDefaultImageId] = useState<string | null>(null);
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
     key: "createdAt",
@@ -373,6 +375,8 @@ function MachinesPage() {
           setSignedIn(result.signedIn);
           setCreating(result.creating);
           setVercelUrl(result.vercelUrl);
+          setReadyImages(result.readyImages);
+          setDefaultImageId(result.defaultImageId);
           setError(null);
         },
         (cause: unknown) => {
@@ -397,10 +401,10 @@ function MachinesPage() {
 
   useRealtime("machines-changed", () => refetch());
 
-  const create = () => {
+  const create = (imageId: string | null) => {
     setCreating(true);
     setError(null);
-    rpc.call("machines_create").then(
+    rpc.call("machines_create", { imageId }).then(
       () => refetch(),
       (cause: unknown) => {
         setCreating(false);
@@ -457,14 +461,65 @@ function MachinesPage() {
     <div className="h-full overflow-auto p-4 md:p-5">
       <div className="mx-auto w-full max-w-4xl space-y-4">
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" onClick={create} disabled={creating || !signedIn}>
-            {creating ? (
-              <Spinner className="mr-2" />
-            ) : (
-              <Icon name="Plus" className="mr-1.5 size-4" aria-hidden />
-            )}
-            {creating ? "Creating…" : "Create cloud machine"}
-          </Button>
+          {readyImages.length === 0 ? (
+            // Without a built image a machine would install bb's prerequisites
+            // from scratch, so point at the Images tab instead of offering it.
+            <Button size="sm" asChild>
+              <UrlLink href={SETTINGS_IMAGES_HREF}>
+                <Icon name="Plus" className="mr-1.5 size-4" aria-hidden />
+                Setup images
+              </UrlLink>
+            </Button>
+          ) : (
+            <div className="flex items-center">
+              <Button
+                size="sm"
+                className="rounded-r-none"
+                onClick={() => create(defaultImageId)}
+                disabled={creating || !signedIn}
+              >
+                {creating ? (
+                  <Spinner className="mr-2" />
+                ) : (
+                  <Icon name="Plus" className="mr-1.5 size-4" aria-hidden />
+                )}
+                {creating
+                  ? "Creating…"
+                  : `Create cloud machine${
+                      defaultImageId === null
+                        ? ""
+                        : ` (${readyImages.find((i) => i.id === defaultImageId)?.name ?? ""})`
+                    }`}
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="sm"
+                    className="rounded-l-none border-l border-background/30 px-2"
+                    disabled={creating || !signedIn}
+                    aria-label="Choose an image"
+                  >
+                    {"\u25be"}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  {readyImages.map((image) => (
+                    <DropdownMenuItem
+                      key={image.id}
+                      onSelect={() => create(image.id)}
+                    >
+                      {image.name}
+                      {image.id === defaultImageId ? " ·" : ""}
+                    </DropdownMenuItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={() => create(null)}>
+                    No image (default sandbox)
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          )}
           {/* Internal bb route: UrlLink keeps it in SPA history. */}
           <UrlLink
             href="/settings/machines"
@@ -551,6 +606,7 @@ function MachinesPage() {
                     onSort={toggleSort}
                   />
                   <TableHead>Status</TableHead>
+                  <TableHead>Image</TableHead>
                   <SortableHead
                     label="Created"
                     column="createdAt"
@@ -570,7 +626,7 @@ function MachinesPage() {
                 {visible.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={5}
+                      colSpan={6}
                       className="text-center text-xs text-muted-foreground"
                     >
                       No machines with that status.
@@ -596,6 +652,11 @@ function MachinesPage() {
                         </TableCell>
                         <TableCell>
                           <StatusCell machine={machine} />
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-xs text-muted-foreground">
+                            {machine.imageName ?? "—"}
+                          </span>
                         </TableCell>
                         <TableCell>
                           <DateCell
@@ -1191,9 +1252,20 @@ function VercelAuthSection() {
 }
 
 /** Images, Agents and Configuration, per the plugin's settings page. */
+/** Route of this plugin's settings page; `#images` opens the Images tab. */
+export const SETTINGS_IMAGES_HREF = "/settings/plugins/cloud-sandbox#images";
+
+const SETTINGS_TABS = ["images", "agents", "authentication"] as const;
+
 function CloudSandboxSettings() {
+  // The tab is component state, so a deep link has to carry it in the hash.
+  const [tab, setTab] = useState(() => {
+    const hash =
+      typeof window === "undefined" ? "" : window.location.hash.replace("#", "");
+    return (SETTINGS_TABS as readonly string[]).includes(hash) ? hash : "images";
+  });
   return (
-    <Tabs defaultValue="images">
+    <Tabs value={tab} onValueChange={setTab}>
       <TabsList>
         <TabsTrigger value="images">Images</TabsTrigger>
         <TabsTrigger value="agents">Agents</TabsTrigger>

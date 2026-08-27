@@ -67,8 +67,14 @@ export function buildEnrollmentScript(details: EnrollmentDetails): string {
   const { joinCode, hostId, serverUrl, machineCode } = details;
   return [
     "set -e",
-    "sudo apt-get update -qq",
-    "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential >/dev/null 2>&1",
+    // A custom image already carries these, and reinstalling them is most of
+    // what makes enrolling onto a bare sandbox slow.
+    'if command -v make >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then',
+    '  echo "prerequisites already present; skipping apt"',
+    "else",
+    "  sudo apt-get update -qq",
+    "  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential >/dev/null 2>&1",
+    "fi",
     "export BB_INSTALL_SKIP_SERVICE=1",
     `curl -fL --connect-timeout 10 --max-time 60 --retry 2 ${serverUrl}/install.sh | sh -s -- --join-code ${joinCode} --host-id ${hostId} --server ${serverUrl} --machine-code ${machineCode}`,
   ].join("\n");
@@ -90,6 +96,11 @@ export async function createMachine(options: {
    * long-lived token never lands in a shared image layer.
    */
   env?: Record<string, string>;
+  /**
+   * A built image to boot from, as `repository:tag`. Omitted means Vercel's
+   * default managed image, which carries none of bb's prerequisites.
+   */
+  image?: string;
   /** Sandbox lifetime; Vercel caps this at 45m on Hobby, 24h on Pro. */
   timeoutMs: number;
   vcpus?: number;
@@ -97,14 +108,23 @@ export async function createMachine(options: {
   /** Called once the sandbox exists, before the slow enrollment starts. */
   onCreated?: (name: string) => void | Promise<void>;
 }): Promise<{ name: string; enrollLog: string }> {
-  const { credentials, enrollment, env, timeoutMs, vcpus, signal, onCreated } =
-    options;
+  const {
+    credentials,
+    enrollment,
+    env,
+    image,
+    timeoutMs,
+    vcpus,
+    signal,
+    onCreated,
+  } = options;
 
   const sandbox = await Sandbox.create({
     ...credentials,
     name: `${MACHINE_NAME_PREFIX}${randomUUID().slice(0, 8)}`,
     timeout: timeoutMs,
     ...(env === undefined || Object.keys(env).length === 0 ? {} : { env }),
+    ...(image === undefined || image === "" ? {} : { image }),
     ...(vcpus === undefined ? {} : { resources: { vcpus } }),
     ...(signal === undefined ? {} : { signal }),
   });

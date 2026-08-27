@@ -98,6 +98,9 @@ const machineRecordSchema = z.object({
   createdAt: z.number(),
   /** Epoch ms the machine was first observed to be no longer running. */
   disconnectedAt: z.number().nullable(),
+  /** The image this machine was created from, if any. */
+  imageId: z.string().nullable(),
+  imageName: z.string().nullable(),
 });
 type MachineRecord = z.infer<typeof machineRecordSchema>;
 
@@ -124,6 +127,8 @@ const machineViewSchema = z.object({
   lastUsedAt: z.number().nullable(),
   /** True while this machine is being woken. */
   waking: z.boolean(),
+  /** Name of the image this machine was created from, if any. */
+  imageName: z.string().nullable(),
   error: z.string().nullable(),
 });
 export type MachineView = z.infer<typeof machineViewSchema>;
@@ -179,9 +184,16 @@ export const rpcContract = defineRpcContract({
       creating: z.boolean(),
       /** Deep link to this project's sandboxes on vercel.com, when derivable. */
       vercelUrl: z.string().nullable(),
+      /** Images that have been built, for the create button's picker. */
+      readyImages: z.array(z.object({ id: z.string(), name: z.string() })),
+      /** Which of those the create button uses unless told otherwise. */
+      defaultImageId: z.string().nullable(),
     }),
   },
-  machines_create: { input: z.null(), output: z.object({ started: z.boolean() }) },
+  machines_create: {
+    input: z.object({ imageId: z.string().nullable() }),
+    output: z.object({ started: z.boolean() }),
+  },
   /** Resume a stopped machine and bring its bb daemon back. */
   machines_wake: {
     input: z.object({ name: z.string().min(1) }),
@@ -624,14 +636,23 @@ export default async function plugin(bb: BbPluginApi) {
     signedIn: boolean;
     creating: boolean;
     vercelUrl: string | null;
+    readyImages: { id: string; name: string }[];
+    defaultImageId: string | null;
   }> {
     const session = await ensureFreshSession();
+    const readyImages = listImages()
+      .filter((image) => image.status === "ready" && image.imageRef !== null)
+      .map((image) => ({ id: image.id, name: image.name }));
+    const defaultImageId = await resolveDefaultImageId(readyImages);
+
     if (session === null) {
       return {
         machines: [],
         signedIn: false,
         creating: creating.size > 0,
         vercelUrl: null,
+        readyImages,
+        defaultImageId,
       };
     }
     const credentials: SandboxCredentials = {
@@ -688,6 +709,7 @@ export default async function plugin(bb: BbPluginApi) {
           sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
+          imageName: record?.imageName ?? null,
           error: `Sandbox ${sandbox.status}`,
         };
       }
@@ -703,6 +725,7 @@ export default async function plugin(bb: BbPluginApi) {
           sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
+          imageName: record?.imageName ?? null,
           error: null,
         };
       }
@@ -723,6 +746,7 @@ export default async function plugin(bb: BbPluginApi) {
           sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
+          imageName: record?.imageName ?? null,
           error: null,
         };
       }
@@ -737,6 +761,7 @@ export default async function plugin(bb: BbPluginApi) {
         sessionStartedAt,
         lastUsedAt,
         waking: waking.has(sandbox.name),
+        imageName: record?.imageName ?? null,
         error: null,
       };
     });
@@ -754,6 +779,8 @@ export default async function plugin(bb: BbPluginApi) {
       signedIn: true,
       creating: creating.size > 0,
       vercelUrl: buildVercelUrl(session),
+      readyImages,
+      defaultImageId,
     };
   }
 
@@ -797,9 +824,34 @@ export default async function plugin(bb: BbPluginApi) {
     return token === "" ? {} : { CLAUDE_CODE_OAUTH_TOKEN: token };
   }
 
-  async function startCreate(): Promise<boolean> {
+  /**
+   * The image the create button uses by default: the one most recently used to
+   * create a machine, falling back to the newest built image when that one is
+   * gone or nothing has been created yet.
+   */
+  async function resolveDefaultImageId(
+    readyImages: { id: string }[],
+  ): Promise<string | null> {
+    if (readyImages.length === 0) return null;
+    const last = await bb.storage.kv.get<string>("lastImageId");
+    if (
+      typeof last === "string" &&
+      readyImages.some((image) => image.id === last)
+    ) {
+      return last;
+    }
+    return readyImages[0]?.id ?? null;
+  }
+
+  async function startCreate(imageId: string | null): Promise<boolean> {
     const credentials = await requireCredentials();
     const values = await settings.get();
+    const image = imageId === null ? null : getImage(imageId);
+    if (imageId !== null && (image === null || image.imageRef === null)) {
+      throw new Error(
+        `Image ${imageId} has not been built, so no machine can be created from it.`,
+      );
+    }
     const seconds = Number.parseInt(values.machineTimeoutSeconds, 10);
     const timeoutMs =
       Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 2_700_000;
@@ -811,12 +863,21 @@ export default async function plugin(bb: BbPluginApi) {
 
     void (async () => {
       try {
-        await record("create.requested", null, "Creating a cloud machine.");
+        await record(
+          "create.requested",
+          null,
+          image === null
+            ? "Creating a cloud machine from the default sandbox image."
+            : `Creating a cloud machine from image "${image.name}".`,
+        );
+        // Remember the choice so the button defaults to it next time.
+        if (image !== null) await bb.storage.kv.set("lastImageId", image.id);
         const enrollment = await mintEnrollment();
         const result = await createMachine({
           credentials,
           enrollment,
           env: await agentEnv(),
+          ...(image?.imageRef == null ? {} : { image: image.imageRef }),
           timeoutMs,
           vcpus: Number.isFinite(vcpus) ? vcpus : 2,
           onCreated: async (name) => {
@@ -828,6 +889,8 @@ export default async function plugin(bb: BbPluginApi) {
                 hostId: enrollment.hostId,
                 createdAt: Date.now(),
                 disconnectedAt: null,
+                imageId: image?.id ?? null,
+                imageName: image?.name ?? null,
               },
               ...(await readRecords()),
             ]);
@@ -1062,7 +1125,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
     auth_sign_out: () => signOut(),
     machines_list: () => describeMachines(),
-    machines_create: async () => ({ started: await startCreate() }),
+    machines_create: async ({ imageId }) => ({
+      started: await startCreate(imageId),
+    }),
     machines_wake: async ({ name }) => ({ started: await startWake(name) }),
     machines_stop: async ({ name }) => ({
       stopped: await stopMachineByName(name),

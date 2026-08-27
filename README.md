@@ -7,7 +7,8 @@ can run threads. The interface is entirely graphical.
 
 - **Cloud Machines page** — a table of machines with status, created and
   last-used times, sortable by name or either date and filterable by status.
-  Each row has a menu to wake, stop or delete it; plus create, manual refresh,
+  Each row shows the image it was created from and has a menu to wake, stop or
+  delete it; plus create, manual refresh,
   links to bb's own machine settings and to the project's sandboxes on
   vercel.com, and a collapsible debug log.
 - **Settings** — three tabs: **Images** (custom machine images), **Agents**
@@ -94,6 +95,17 @@ injected per machine from the Agents tab.
 
 Images and their build logs live in the plugin's SQLite database rather than
 `bb.storage.kv`, because a build log routinely exceeds the 256KB kv value cap.
+
+**Creating a machine** uses the image most recently used, changeable from the
+chevron beside the button; the dropdown also offers "No image" for Vercel's
+default managed image. Until an image has been built the button is replaced by
+**Setup images**, which links to `#images` on this plugin's settings page —
+without one, a machine would install bb's prerequisites from scratch.
+
+Baking those prerequisites cuts enrolment from about **49s to 29s** measured
+between the `create.sandbox-ready` and `create.enrolled` debug events. The
+remaining time is mostly installing bb-app itself, which is not baked because
+the package is served by the bb server and has to match its version.
 
 ## Building custom images
 
