@@ -27,10 +27,12 @@ import {
   type EnrollmentDetails,
   type SandboxCredentials,
 } from "./machines.js";
+import { buildImage, type ImageEnvVar } from "./images.js";
 
 /** Debug events kept for troubleshooting. Bounded to stay under the kv cap. */
 const MAX_EVENTS = 200;
 const MACHINES_CHANGED = "machines-changed";
+const IMAGES_CHANGED = "images-changed";
 const AUTH_CHANGED = "auth-changed";
 const REFRESH_SKEW_MS = 60_000;
 
@@ -126,6 +128,38 @@ const machineViewSchema = z.object({
 });
 export type MachineView = z.infer<typeof machineViewSchema>;
 
+const imageStatusSchema = z.enum(["pending", "building", "ready", "error"]);
+
+const envVarSchema = z.object({
+  key: z.string().min(1).max(200),
+  value: z.string().max(10_000),
+});
+
+const imageSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  commands: z.string(),
+  env: z.array(envVarSchema),
+  status: imageStatusSchema,
+  /** Reference to pass to Sandbox.create, once a build has succeeded. */
+  imageRef: z.string().nullable(),
+  lastError: z.string().nullable(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+export type PluginImage = z.infer<typeof imageSchema>;
+
+const buildSchema = z.object({
+  id: z.string(),
+  imageId: z.string(),
+  status: z.enum(["building", "ready", "error"]),
+  startedAt: z.number(),
+  finishedAt: z.number().nullable(),
+  imageRef: z.string().nullable(),
+  error: z.string().nullable(),
+});
+export type PluginBuild = z.infer<typeof buildSchema>;
+
 export const rpcContract = defineRpcContract({
   auth_status: { input: z.null(), output: authStatusSchema },
   agents_status: { input: z.null(), output: agentsStatusSchema },
@@ -162,6 +196,36 @@ export const rpcContract = defineRpcContract({
   machines_remove: {
     input: z.object({ name: z.string().min(1) }),
     output: z.object({ removed: z.boolean() }),
+  },
+  images_list: {
+    input: z.null(),
+    output: z.object({ images: z.array(imageSchema) }),
+  },
+  images_create: { input: z.null(), output: imageSchema },
+  images_update: {
+    input: z.object({
+      id: z.string(),
+      name: z.string().min(1).max(80).optional(),
+      commands: z.string().max(50_000).optional(),
+      env: z.array(envVarSchema).max(100).optional(),
+    }),
+    output: imageSchema,
+  },
+  images_delete: {
+    input: z.object({ id: z.string() }),
+    output: z.object({ deleted: z.boolean() }),
+  },
+  images_build: {
+    input: z.object({ id: z.string() }),
+    output: z.object({ started: z.boolean() }),
+  },
+  builds_list: {
+    input: z.object({ imageId: z.string() }),
+    output: z.object({ builds: z.array(buildSchema) }),
+  },
+  build_log: {
+    input: z.object({ id: z.string() }),
+    output: z.object({ log: z.string() }),
   },
   events_list: {
     input: z.null(),
@@ -223,6 +287,96 @@ export default async function plugin(bb: BbPluginApi) {
   const creating = new Set<string>();
   /** Sandbox names currently being woken. */
   const waking = new Set<string>();
+
+  // Images and their build logs live in the plugin's own SQLite rather than
+  // kv: a build log routinely exceeds the 256KB kv value cap.
+  const db = bb.storage.database();
+  bb.storage.migrate(db, [
+    `CREATE TABLE IF NOT EXISTS images (
+       id TEXT PRIMARY KEY,
+       name TEXT NOT NULL,
+       commands TEXT NOT NULL DEFAULT '',
+       env TEXT NOT NULL DEFAULT '[]',
+       status TEXT NOT NULL DEFAULT 'pending',
+       image_ref TEXT,
+       last_error TEXT,
+       created_at INTEGER NOT NULL,
+       updated_at INTEGER NOT NULL
+     )`,
+    `CREATE TABLE IF NOT EXISTS builds (
+       id TEXT PRIMARY KEY,
+       image_id TEXT NOT NULL,
+       status TEXT NOT NULL,
+       started_at INTEGER NOT NULL,
+       finished_at INTEGER,
+       image_ref TEXT,
+       error TEXT,
+       log TEXT NOT NULL DEFAULT ''
+     )`,
+    `CREATE INDEX IF NOT EXISTS builds_by_image ON builds (image_id, started_at DESC)`,
+  ]);
+
+  interface ImageRow {
+    id: string;
+    name: string;
+    commands: string;
+    env: string;
+    status: string;
+    image_ref: string | null;
+    last_error: string | null;
+    created_at: number;
+    updated_at: number;
+  }
+
+  function toImage(row: ImageRow): PluginImage {
+    const parsed = z.array(envVarSchema).safeParse(JSON.parse(row.env));
+    return {
+      id: row.id,
+      name: row.name,
+      commands: row.commands,
+      env: parsed.success ? parsed.data : [],
+      status: imageStatusSchema.parse(row.status),
+      imageRef: row.image_ref,
+      lastError: row.last_error,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  function listImages(): PluginImage[] {
+    return db
+      .prepare("SELECT * FROM images ORDER BY created_at DESC")
+      .all()
+      .map((row) => toImage(row as ImageRow));
+  }
+
+  function getImage(id: string): PluginImage | null {
+    const row = db.prepare("SELECT * FROM images WHERE id = ?").get(id);
+    return row === undefined ? null : toImage(row as ImageRow);
+  }
+
+  function setImageStatus(
+    id: string,
+    status: PluginImage["status"],
+    fields: { imageRef?: string | null; lastError?: string | null } = {},
+  ): void {
+    db.prepare(
+      `UPDATE images SET status = ?, updated_at = ?,
+         image_ref = COALESCE(?, image_ref),
+         last_error = ?
+       WHERE id = ?`,
+    ).run(
+      status,
+      Date.now(),
+      fields.imageRef ?? null,
+      fields.lastError ?? null,
+      id,
+    );
+    bb.realtime.publish(IMAGES_CHANGED, {});
+  }
+
+  /** Images whose build is running in this plugin generation. */
+  const building = new Set<string>();
 
   // ---------------------------------------------------------------- events
 
@@ -811,6 +965,80 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
+  /**
+   * Run a build to completion in the background.
+   *
+   * The log is written to the build row as it streams, so the UI can follow a
+   * running build instead of waiting for the whole thing.
+   */
+  async function startBuild(imageId: string): Promise<boolean> {
+    if (building.has(imageId)) return false;
+    const image = getImage(imageId);
+    if (image === null) throw new Error(`No image with id ${imageId}`);
+
+    const session = await ensureFreshSession();
+    if (session === null) {
+      throw new Error(
+        "Not signed in to Vercel. Use Sign in with Vercel on this plugin's settings page.",
+      );
+    }
+    if (session.teamSlug === null || session.teamSlug === "") {
+      throw new Error(
+        "Vercel team slug is unknown, so the registry path cannot be built. Sign out and back in.",
+      );
+    }
+
+    const buildId = randomUUID().slice(0, 8);
+    db.prepare(
+      "INSERT INTO builds (id, image_id, status, started_at, log) VALUES (?, ?, 'building', ?, '')",
+    ).run(buildId, imageId, Date.now());
+    building.add(imageId);
+    setImageStatus(imageId, "building", { lastError: null });
+
+    void (async () => {
+      const appendLog = (chunk: string) => {
+        db.prepare("UPDATE builds SET log = log || ? WHERE id = ?").run(
+          chunk,
+          buildId,
+        );
+        bb.realtime.publish(IMAGES_CHANGED, {});
+      };
+      try {
+        const result = await buildImage({
+          credentials: {
+            token: session.accessToken,
+            teamId: session.teamId,
+            projectId: session.projectId,
+          },
+          teamSlug: session.teamSlug!,
+          projectId: session.projectId,
+          // The tag is the image id, so rebuilding replaces the image in place
+          // rather than accumulating tags nobody can tell apart.
+          tag: image.id,
+          commands: image.commands,
+          env: image.env as ImageEnvVar[],
+          onLog: appendLog,
+        });
+        db.prepare(
+          "UPDATE builds SET status = 'ready', finished_at = ?, image_ref = ? WHERE id = ?",
+        ).run(Date.now(), result.imageRef, buildId);
+        setImageStatus(imageId, "ready", { imageRef: result.imageRef });
+        bb.log.info(`image ${image.name} built as ${result.imageRef}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        db.prepare(
+          "UPDATE builds SET status = 'error', finished_at = ?, error = ? WHERE id = ?",
+        ).run(Date.now(), message, buildId);
+        setImageStatus(imageId, "error", { lastError: message });
+        bb.log.warn(`image ${image.name} build failed: ${message}`);
+      } finally {
+        building.delete(imageId);
+        bb.realtime.publish(IMAGES_CHANGED, {});
+      }
+    })();
+    return true;
+  }
+
   bb.rpc.register(rpcContract, {
     auth_status: () => describeAuth(),
     agents_status: async () => {
@@ -842,6 +1070,79 @@ export default async function plugin(bb: BbPluginApi) {
     machines_remove: async ({ name }) => ({
       removed: await removeMachineByName(name),
     }),
+    images_list: () => ({ images: listImages() }),
+    images_create: () => {
+      const now = Date.now();
+      const id = randomUUID().slice(0, 8);
+      const count = (
+        db.prepare("SELECT COUNT(*) AS n FROM images").get() as { n: number }
+      ).n;
+      db.prepare(
+        `INSERT INTO images (id, name, commands, env, status, created_at, updated_at)
+         VALUES (?, ?, '', '[]', 'pending', ?, ?)`,
+      ).run(id, `Image ${count + 1}`, now, now);
+      bb.realtime.publish(IMAGES_CHANGED, {});
+      const created = getImage(id);
+      if (created === null) throw new Error("Image was not created.");
+      return created;
+    },
+    images_update: ({ id, name, commands, env }) => {
+      const existing = getImage(id);
+      if (existing === null) throw new Error(`No image with id ${id}`);
+      db.prepare(
+        `UPDATE images SET name = ?, commands = ?, env = ?, updated_at = ? WHERE id = ?`,
+      ).run(
+        name ?? existing.name,
+        commands ?? existing.commands,
+        JSON.stringify(env ?? existing.env),
+        Date.now(),
+        id,
+      );
+      bb.realtime.publish(IMAGES_CHANGED, {});
+      const updated = getImage(id);
+      if (updated === null) throw new Error(`No image with id ${id}`);
+      return updated;
+    },
+    images_delete: ({ id }) => {
+      // The pushed image itself is left in the registry; deleting it needs a
+      // registry call this plugin does not make yet.
+      db.prepare("DELETE FROM builds WHERE image_id = ?").run(id);
+      const result = db.prepare("DELETE FROM images WHERE id = ?").run(id);
+      bb.realtime.publish(IMAGES_CHANGED, {});
+      return { deleted: result.changes > 0 };
+    },
+    images_build: async ({ id }) => ({ started: await startBuild(id) }),
+    builds_list: ({ imageId }) => ({
+      builds: db
+        .prepare(
+          "SELECT id, image_id, status, started_at, finished_at, image_ref, error FROM builds WHERE image_id = ? ORDER BY started_at DESC LIMIT 50",
+        )
+        .all(imageId)
+        .map((row) => {
+          const build = row as {
+            id: string;
+            image_id: string;
+            status: string;
+            started_at: number;
+            finished_at: number | null;
+            image_ref: string | null;
+            error: string | null;
+          };
+          return {
+            id: build.id,
+            imageId: build.image_id,
+            status: build.status as PluginBuild["status"],
+            startedAt: build.started_at,
+            finishedAt: build.finished_at,
+            imageRef: build.image_ref,
+            error: build.error,
+          };
+        }),
+    }),
+    build_log: ({ id }) => {
+      const row = db.prepare("SELECT log FROM builds WHERE id = ?").get(id);
+      return { log: row === undefined ? "" : ((row as { log: string }).log ?? "") };
+    },
     events_list: async () => ({ events: await readEvents() }),
     events_clear: async () => {
       const cleared = (await readEvents()).length;

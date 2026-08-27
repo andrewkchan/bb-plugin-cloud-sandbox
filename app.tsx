@@ -10,7 +10,14 @@ import {
   useRpc,
   UrlLink,
 } from "@get-bb/plugin-sdk/app";
-import type { AuthStatus, DebugEvent, MachineView, rpcContract } from "./server";
+import type {
+  AuthStatus,
+  DebugEvent,
+  MachineView,
+  PluginBuild,
+  PluginImage,
+  rpcContract,
+} from "./server";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -636,6 +643,352 @@ function MachinesPage() {
   );
 }
 
+
+const IMAGE_STATUS_STYLES: Record<PluginImage["status"], string> = {
+  ready: "bg-emerald-500",
+  building: "bg-amber-500",
+  pending: "bg-muted-foreground/40",
+  error: "bg-destructive",
+};
+
+const IMAGE_STATUS_LABELS: Record<PluginImage["status"], string> = {
+  ready: "Ready",
+  building: "Building",
+  pending: "Pending",
+  error: "Error",
+};
+
+function ImageStatus({ status }: { status: PluginImage["status"] }) {
+  return (
+    <span className="flex items-center gap-2 text-xs text-muted-foreground">
+      {status === "building" ? (
+        <Spinner className="size-3" />
+      ) : (
+        <span
+          aria-hidden
+          className={cn("size-2 shrink-0 rounded-full", IMAGE_STATUS_STYLES[status])}
+        />
+      )}
+      {IMAGE_STATUS_LABELS[status]}
+    </span>
+  );
+}
+
+/** One build's captured log, fetched on demand. */
+function BuildLog({ build, onBack }: { build: PluginBuild; onBack: () => void }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [log, setLog] = useState<string | null>(null);
+
+  const refetch = useCallback(() => {
+    rpc.call("build_log", { id: build.id }).then(
+      (r) => setLog(r.log),
+      () => setLog(""),
+    );
+  }, [rpc, build.id]);
+
+  useEffect(refetch, [refetch]);
+  // A running build appends to its log as it goes.
+  useRealtime("images-changed", () => {
+    if (build.status === "building") refetch();
+  });
+
+  return (
+    <div className="space-y-2">
+      <Button variant="outline" size="sm" onClick={onBack}>
+        Back to builds
+      </Button>
+      <p className="text-xs text-muted-foreground">
+        Build {build.id} · {IMAGE_STATUS_LABELS[build.status === "ready" ? "ready" : build.status === "error" ? "error" : "building"]}
+        {build.error === null ? null : ` · ${build.error}`}
+      </p>
+      <pre className="max-h-[28rem] overflow-auto rounded-md border border-border bg-card p-2 font-mono text-xs whitespace-pre-wrap">
+        {log === null ? "Loading…" : log === "" ? "No output." : log}
+      </pre>
+    </div>
+  );
+}
+
+/** An image's configuration, its Build button, and its build history. */
+function ImageDetail({ image, onBack }: { image: PluginImage; onBack: () => void }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [name, setName] = useState(image.name);
+  const [commands, setCommands] = useState(image.commands);
+  const [env, setEnv] = useState<{ key: string; value: string }[]>(image.env);
+  const [builds, setBuilds] = useState<PluginBuild[] | null>(null);
+  const [openBuild, setOpenBuild] = useState<PluginBuild | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  const report = useCallback((cause: unknown) => {
+    setBusy(false);
+    setError(cause instanceof Error ? cause.message : String(cause));
+  }, []);
+
+  const refetchBuilds = useCallback(() => {
+    rpc.call("builds_list", { imageId: image.id }).then(
+      (r) => setBuilds(r.builds),
+      report,
+    );
+  }, [rpc, image.id, report]);
+
+  useEffect(refetchBuilds, [refetchBuilds]);
+  useRealtime("images-changed", refetchBuilds);
+
+  const save = () => {
+    setBusy(true);
+    setError(null);
+    rpc
+      .call("images_update", { id: image.id, name, commands, env })
+      .then(() => {
+        setBusy(false);
+        setSaved(true);
+      }, report);
+  };
+
+  const build = () => {
+    setBusy(true);
+    setError(null);
+    // Save first: building the previous configuration would be surprising.
+    rpc
+      .call("images_update", { id: image.id, name, commands, env })
+      .then(() => rpc.call("images_build", { id: image.id }))
+      .then(() => {
+        setBusy(false);
+        refetchBuilds();
+      }, report);
+  };
+
+  if (openBuild !== null) {
+    return <BuildLog build={openBuild} onBack={() => setOpenBuild(null)} />;
+  }
+
+  return (
+    <div className="space-y-4 text-sm">
+      <div className="flex items-center gap-2">
+        <Button variant="outline" size="sm" onClick={onBack}>
+          Back to images
+        </Button>
+        <ImageStatus status={image.status} />
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium" htmlFor="image-name">
+          Name
+        </label>
+        <Input
+          id="image-name"
+          value={name}
+          onChange={(event) => {
+            setName(event.target.value);
+            setSaved(false);
+          }}
+          className="max-w-sm"
+        />
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium" htmlFor="image-commands">
+          Custom commands
+        </label>
+        <p className="text-xs text-muted-foreground">
+          Shell run after bb&apos;s prerequisites are installed. One command per
+          line; a failing line fails the build.
+        </p>
+        <textarea
+          id="image-commands"
+          value={commands}
+          onChange={(event) => {
+            setCommands(event.target.value);
+            setSaved(false);
+          }}
+          rows={8}
+          spellCheck={false}
+          placeholder="npm install -g @anthropic-ai/claude-code"
+          className="w-full rounded-md border border-border bg-card p-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        />
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Environment variables</label>
+        <p className="text-xs text-muted-foreground">
+          Baked into the image, so they are visible to anyone who can pull it.
+          Keep secrets out; agent credentials are injected per machine from the
+          Agents tab.
+        </p>
+        {env.map((entry, index) => (
+          <div key={index} className="flex items-center gap-2">
+            <Input
+              value={entry.key}
+              placeholder="NAME"
+              className="max-w-[12rem] font-mono"
+              onChange={(event) => {
+                const next = [...env];
+                next[index] = { ...entry, key: event.target.value };
+                setEnv(next);
+                setSaved(false);
+              }}
+            />
+            <Input
+              value={entry.value}
+              placeholder="value"
+              className="font-mono"
+              onChange={(event) => {
+                const next = [...env];
+                next[index] = { ...entry, value: event.target.value };
+                setEnv(next);
+                setSaved(false);
+              }}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setEnv(env.filter((_, i) => i !== index));
+                setSaved(false);
+              }}
+            >
+              Remove
+            </Button>
+          </div>
+        ))}
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setEnv([...env, { key: "", value: "" }])}
+        >
+          Add variable
+        </Button>
+      </div>
+
+      {error !== null ? <p className="text-destructive">{error}</p> : null}
+
+      <div className="flex items-center gap-2">
+        <Button size="sm" onClick={build} disabled={busy || image.status === "building"}>
+          {image.status === "building" ? "Building…" : "Build"}
+        </Button>
+        <Button variant="outline" size="sm" onClick={save} disabled={busy}>
+          {saved ? "Saved" : "Save"}
+        </Button>
+        {image.imageRef === null ? null : (
+          <span className="font-mono text-xs text-muted-foreground">
+            {image.imageRef}
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-1.5">
+        <p className="text-xs font-medium">Builds</p>
+        {builds === null ? (
+          <p className="text-xs text-muted-foreground">Loading…</p>
+        ) : builds.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No builds yet.</p>
+        ) : (
+          <ul className="space-y-1">
+            {builds.map((entry) => (
+              <li key={entry.id}>
+                <button
+                  type="button"
+                  onClick={() => setOpenBuild(entry)}
+                  className="flex w-full items-center gap-3 rounded-md border border-border p-2 text-left text-xs hover:bg-card"
+                >
+                  <span className="font-mono">{entry.id}</span>
+                  <span
+                    className={cn(
+                      entry.status === "error" && "text-destructive",
+                      entry.status === "ready" && "text-foreground",
+                      entry.status === "building" && "text-muted-foreground",
+                    )}
+                  >
+                    {entry.status}
+                  </span>
+                  <span className="text-muted-foreground">
+                    {new Date(entry.startedAt).toLocaleString()}
+                  </span>
+                  <span className="ml-auto text-muted-foreground">View log</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ImagesTab() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [images, setImages] = useState<PluginImage[] | null>(null);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const report = useCallback((cause: unknown) => {
+    setError(cause instanceof Error ? cause.message : String(cause));
+  }, []);
+
+  const refetch = useCallback(() => {
+    rpc.call("images_list").then((r) => setImages(r.images), report);
+  }, [rpc, report]);
+
+  useEffect(refetch, [refetch]);
+  useRealtime("images-changed", refetch);
+
+  const open = images?.find((image) => image.id === openId) ?? null;
+  if (open !== null) {
+    return <ImageDetail image={open} onBack={() => setOpenId(null)} />;
+  }
+
+  return (
+    <div className="space-y-3 text-sm">
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          onClick={() =>
+            rpc.call("images_create").then((image) => {
+              refetch();
+              setOpenId(image.id);
+            }, report)
+          }
+        >
+          <Icon name="Plus" className="mr-1.5 size-4" aria-hidden />
+          Create image
+        </Button>
+      </div>
+
+      {error !== null ? <p className="text-destructive">{error}</p> : null}
+
+      {images === null ? (
+        <p className="text-muted-foreground">Loading…</p>
+      ) : images.length === 0 ? (
+        <p className="text-muted-foreground">
+          No images yet. An image bakes bb&apos;s prerequisites and your own
+          setup commands, so machines created from it start faster.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {images.map((image) => (
+            <li key={image.id}>
+              <button
+                type="button"
+                onClick={() => setOpenId(image.id)}
+                className="flex w-full items-center gap-3 rounded-lg border border-border p-3 text-left hover:bg-card"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{image.name}</span>
+                  <span className="block truncate font-mono text-xs text-muted-foreground">
+                    {image.imageRef ?? "not built yet"}
+                  </span>
+                </span>
+                <ImageStatus status={image.status} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 /**
  * Agent credentials. Only Claude Code is supported for now.
  *
@@ -676,11 +1029,7 @@ function AgentsTab() {
         <p className="text-muted-foreground">
           Run{" "}
           <code className="font-mono">claude setup-token</code> on your own
-          machine to obtain a long-lived OAuth token, then paste it here. It is
-          injected into each cloud machine&apos;s environment as{" "}
-          <code className="font-mono">CLAUDE_CODE_OAUTH_TOKEN</code> when the
-          machine is created — not baked into an image, so it never lands in a
-          shared image layer.
+          machine to obtain a long-lived OAuth token, then paste it here.
         </p>
         {tokenSet === null ? (
           <p className="text-muted-foreground">Loading…</p>
@@ -848,17 +1197,15 @@ function CloudSandboxSettings() {
       <TabsList>
         <TabsTrigger value="images">Images</TabsTrigger>
         <TabsTrigger value="agents">Agents</TabsTrigger>
-        <TabsTrigger value="configuration">Configuration</TabsTrigger>
+        <TabsTrigger value="authentication">Authentication</TabsTrigger>
       </TabsList>
       <TabsContent value="images" className="pt-4">
-        <p className="text-sm text-muted-foreground">
-          Custom machine images are not built yet.
-        </p>
+        <ImagesTab />
       </TabsContent>
       <TabsContent value="agents" className="pt-4">
         <AgentsTab />
       </TabsContent>
-      <TabsContent value="configuration" className="pt-4">
+      <TabsContent value="authentication" className="pt-4">
         <VercelAuthSection />
       </TabsContent>
     </Tabs>

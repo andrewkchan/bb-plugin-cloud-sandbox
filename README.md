@@ -11,7 +11,7 @@ can run threads. The interface is entirely graphical.
   links to bb's own machine settings and to the project's sandboxes on
   vercel.com, and a collapsible debug log.
 - **Settings** — three tabs: **Images** (custom machine images), **Agents**
-  (agent credentials) and **Configuration** (the Vercel account).
+  (agent credentials) and **Authentication** (the Vercel account).
 
 ## Setup
 
@@ -73,6 +73,27 @@ as `CLAUDE_CODE_OAUTH_TOKEN` **when the machine is created**, deliberately not
 baked into an image: an image is a shared artifact and a long-lived token must
 not end up in one of its layers. Machines created before a token is set do not
 receive it. Other agent providers are not supported yet.
+
+## Images
+
+An image bakes bb's prerequisites plus your own setup, so a machine created
+from it starts without repeating that work. Each image has a name, a block of
+custom commands, and build-time environment variables; building publishes it
+to the container registry and the image becomes `Ready`.
+
+Every image starts from `docker.io/library/ubuntu:26.04` and installs bb's
+prerequisites first: Node (the host daemon needs 22.19+ and the stock base
+ships none) and a C toolchain (bb-app's `node-pty` is a native add-on built
+from source at enrolment). Custom env vars are declared before the custom
+commands so those commands can use them, and they persist into the running
+machine.
+
+Build-time env vars are baked into the image and visible to anyone who can
+pull it. Agent credentials are deliberately not among them — those are
+injected per machine from the Agents tab.
+
+Images and their build logs live in the plugin's SQLite database rather than
+`bb.storage.kv`, because a build log routinely exceeds the 256KB kv value cap.
 
 ## Building custom images
 

@@ -1,0 +1,204 @@
+// Custom machine images.
+//
+// Vercel Sandbox boots from OCI images in Vercel Container Registry, and
+// nothing in the SDK builds one: `vercel vcr build`/`push` shell out to
+// docker, podman or buildah. Rather than require a container engine on the bb
+// host, a build runs inside a throwaway sandbox that installs buildah itself.
+//
+// Like machines.ts and auth.ts this module carries no bb dependency.
+import { Sandbox } from "@vercel/sandbox";
+import type { SandboxCredentials } from "./machines.js";
+
+/** The registry every image is pushed to. */
+export const REGISTRY_HOST = "vcr.vercel.com";
+/** The single repository this plugin keeps its images in. */
+export const DEFAULT_REPOSITORY = "bb-cloud-machine";
+
+/**
+ * The base every image is built from.
+ *
+ * Not `vercel/sandbox/ubuntu`: that is a Vercel-internal shorthand accepted by
+ * `Sandbox.create({ image })`, and `vcr.vercel.com/vercel/sandbox/ubuntu`
+ * returns 404. This is the same distribution the managed image runs.
+ */
+export const BASE_IMAGE = "docker.io/library/ubuntu:26.04";
+
+/** A build-time environment variable baked into the image. */
+export interface ImageEnvVar {
+  key: string;
+  value: string;
+}
+
+export interface BuildImageOptions {
+  credentials: SandboxCredentials;
+  /** Team slug, for the registry path and the Vercel CLI's --scope. */
+  teamSlug: string;
+  /** Project id, for the registry path and the Vercel CLI's --project. */
+  projectId: string;
+  /** Tag this image is published under, unique per image. */
+  tag: string;
+  /** Shell run after bb's prerequisites are installed. May be empty. */
+  commands: string;
+  env: ImageEnvVar[];
+  /** How long the build sandbox may live. */
+  timeoutMs?: number;
+  vcpus?: number;
+  signal?: AbortSignal;
+  /** Called with each stage's output so a running build can stream its log. */
+  onLog?: (chunk: string) => void | Promise<void>;
+}
+
+export interface BuildImageResult {
+  /** The reference to pass to `Sandbox.create({ image })`. */
+  imageRef: string;
+  /** Fully qualified registry reference, for the Vercel dashboard. */
+  registryRef: string;
+  log: string;
+}
+
+/** Reject anything that could break out of the Dockerfile's ENV lines. */
+function assertSafeEnv(env: ImageEnvVar[]): void {
+  for (const { key } of env) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new Error(
+        `Invalid environment variable name "${key}". Use letters, digits and underscores, not starting with a digit.`,
+      );
+    }
+  }
+}
+
+/**
+ * The Dockerfile an image is built from.
+ *
+ * bb's prerequisites go in first so they are cached below the user's own
+ * layers: Node (the host daemon needs 22.19+, and the stock Ubuntu base ships
+ * none) and a C toolchain, because bb-app's node-pty is a native add-on built
+ * from source at enrolment. Baking these is most of what makes a machine
+ * created from a custom image faster than one built from scratch.
+ *
+ * Custom env vars are declared before the custom commands so those commands
+ * can use them, and they persist into the running machine.
+ */
+export function buildDockerfile(commands: string, env: ImageEnvVar[]): string {
+  assertSafeEnv(env);
+  const lines = [
+    `FROM ${BASE_IMAGE}`,
+    "ENV DEBIAN_FRONTEND=noninteractive",
+    // One layer: bb's prerequisites.
+    "RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends " +
+      "ca-certificates curl git build-essential python3 sudo && " +
+      "curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && " +
+      "apt-get install -y -qq nodejs && " +
+      "rm -rf /var/lib/apt/lists/*",
+  ];
+  for (const { key, value } of env) {
+    // JSON.stringify gives correctly escaped Dockerfile quoting.
+    lines.push(`ENV ${key}=${JSON.stringify(value)}`);
+  }
+  const trimmed = commands.trim();
+  if (trimmed !== "") {
+    // Run the user's script as one layer through a heredoc, so multi-line
+    // input needs no escaping and a failing line fails the build.
+    lines.push(
+      "RUN set -eux; \\",
+      ...trimmed.split("\n").map((line) => `    ${line}; \\`),
+      "    true",
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Build an image and push it to the registry.
+ *
+ * The build runs in its own sandbox, which is always deleted — a leaked build
+ * VM bills until its own timeout and serves no purpose once the image is
+ * pushed.
+ */
+export async function buildImage(
+  options: BuildImageOptions,
+): Promise<BuildImageResult> {
+  const {
+    credentials,
+    teamSlug,
+    projectId,
+    tag,
+    commands,
+    env,
+    timeoutMs = 30 * 60_000,
+    vcpus = 4,
+    signal,
+    onLog,
+  } = options;
+
+  const registryRef = `${REGISTRY_HOST}/${teamSlug}/${projectId}/${DEFAULT_REPOSITORY}:${tag}`;
+  const dockerfile = buildDockerfile(commands, env);
+
+  const sandbox = await Sandbox.create({
+    ...credentials,
+    timeout: timeoutMs,
+    resources: { vcpus },
+    ...(signal === undefined ? {} : { signal }),
+  });
+
+  let log = "";
+  const stage = async (label: string, script: string): Promise<void> => {
+    const finished = await sandbox.runCommand({
+      cmd: "bash",
+      args: ["-lc", script],
+      timeoutMs: Math.min(timeoutMs, 25 * 60_000),
+      ...(signal === undefined ? {} : { signal }),
+    });
+    const [stdout, stderr] = await Promise.all([
+      finished.stdout(),
+      finished.stderr(),
+    ]);
+    const chunk =
+      `\n=== ${label} ===\n${stdout}${stderr === "" ? "" : `\n${stderr}`}`.trimEnd() +
+      "\n";
+    log += chunk;
+    await onLog?.(chunk);
+    if (finished.exitCode !== 0) {
+      throw new Error(`${label} failed (exit ${finished.exitCode}).`);
+    }
+  };
+
+  try {
+    const cli = `--project ${projectId} --scope ${teamSlug} --token ${credentials.token} --cwd /tmp`;
+
+    await stage(
+      "Install build tooling",
+      "sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq buildah >/dev/null 2>&1 && npm i -g vercel >/dev/null 2>&1 && buildah --version && vercel --version",
+    );
+    // Creating a repository that already exists is not an error worth failing
+    // the build over; the push below is what actually matters.
+    await stage(
+      "Ensure registry repository",
+      `vercel vcr add ${DEFAULT_REPOSITORY} ${cli} 2>&1 | tail -3 || true`,
+    );
+    await stage("Authenticate registry", `vercel vcr login buildah ${cli} >/dev/null 2>&1 && echo "authenticated"`);
+    await stage(
+      "Write Dockerfile",
+      `mkdir -p /tmp/img && cat > /tmp/img/Dockerfile <<'BBDOCKERFILE'\n${dockerfile}BBDOCKERFILE\ncat /tmp/img/Dockerfile`,
+    );
+    // --isolation chroot is required: the default tries to create a container
+    // namespace, which a microVM refuses with `mount proc to proc: Operation
+    // not permitted`, failing every RUN step.
+    await stage(
+      "Build image",
+      `cd /tmp/img && buildah bud --isolation chroot -t ${registryRef} . 2>&1`,
+    );
+    await stage("Push image", `buildah push ${registryRef} 2>&1 | tail -5`);
+
+    return {
+      // A bare repository:tag reference resolves against the authenticated
+      // project, which is what Sandbox.create expects.
+      imageRef: `${DEFAULT_REPOSITORY}:${tag}`,
+      registryRef,
+      log,
+    };
+  } finally {
+    await sandbox.stop().catch(() => undefined);
+    await sandbox.delete().catch(() => undefined);
+  }
+}
