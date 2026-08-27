@@ -98,7 +98,11 @@ Images and their build logs live in the plugin's SQLite database rather than
 
 **Creating a machine** uses the image most recently used, changeable from the
 chevron beside the button; the dropdown also offers "No image" for Vercel's
-default managed image. Until an image has been built the button is replaced by
+default managed image. The chevron is a picker, not an action menu — choosing
+an entry only changes what the button will do, and nothing is created until
+the button is pressed. The selection follows the server's default until the
+user picks one, so a background refresh cannot silently change what the button
+would create. Until an image has been built the button is replaced by
 **Setup images**, which links to `#images` on this plugin's settings page —
 without one, a machine would install bb's prerequisites from scratch.
 

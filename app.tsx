@@ -31,6 +31,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -354,6 +356,17 @@ function MachinesPage() {
   const [vercelUrl, setVercelUrl] = useState<string | null>(null);
   const [readyImages, setReadyImages] = useState<{ id: string; name: string }[]>([]);
   const [defaultImageId, setDefaultImageId] = useState<string | null>(null);
+  // The chevron picks which image the button will use; it does not create.
+  // Until the user picks, the selection follows the server's default so a
+  // refresh cannot silently change what the button would do.
+  const [pickedImageId, setPickedImageId] = useState<string | null>(null);
+  const [hasPicked, setHasPicked] = useState(false);
+  const selectedImageId = hasPicked ? pickedImageId : defaultImageId;
+  const selectedImageName =
+    selectedImageId === null
+      ? "no image"
+      : (readyImages.find((image) => image.id === selectedImageId)?.name ??
+        "no image");
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
     key: "createdAt",
@@ -475,7 +488,7 @@ function MachinesPage() {
               <Button
                 size="sm"
                 className="rounded-r-none"
-                onClick={() => create(defaultImageId)}
+                onClick={() => create(selectedImageId)}
                 disabled={creating || !signedIn}
               >
                 {creating ? (
@@ -484,12 +497,8 @@ function MachinesPage() {
                   <Icon name="Plus" className="mr-1.5 size-4" aria-hidden />
                 )}
                 {creating
-                  ? "Creating…"
-                  : `Create cloud machine${
-                      defaultImageId === null
-                        ? ""
-                        : ` (${readyImages.find((i) => i.id === defaultImageId)?.name ?? ""})`
-                    }`}
+                  ? "Creating\u2026"
+                  : `Create cloud machine (${selectedImageName})`}
               </Button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -497,25 +506,31 @@ function MachinesPage() {
                     size="sm"
                     className="rounded-l-none border-l border-background/30 px-2"
                     disabled={creating || !signedIn}
-                    aria-label="Choose an image"
+                    aria-label={`Change image, currently ${selectedImageName}`}
                   >
                     {"\u25be"}
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
-                  {readyImages.map((image) => (
-                    <DropdownMenuItem
-                      key={image.id}
-                      onSelect={() => create(image.id)}
-                    >
-                      {image.name}
-                      {image.id === defaultImageId ? " ·" : ""}
-                    </DropdownMenuItem>
-                  ))}
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onSelect={() => create(null)}>
-                    No image (default sandbox)
-                  </DropdownMenuItem>
+                  {/* A radio group, not a list of actions: choosing an entry
+                      only changes what the button will do. */}
+                  <DropdownMenuRadioGroup
+                    value={selectedImageId ?? ""}
+                    onValueChange={(value) => {
+                      setPickedImageId(value === "" ? null : value);
+                      setHasPicked(true);
+                    }}
+                  >
+                    {readyImages.map((image) => (
+                      <DropdownMenuRadioItem key={image.id} value={image.id}>
+                        {image.name}
+                      </DropdownMenuRadioItem>
+                    ))}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuRadioItem value="">
+                      No image (default sandbox)
+                    </DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
