@@ -609,15 +609,6 @@ function MachinesPage() {
               {lastFailure.status === null ? null : ` (${lastFailure.status})`}
             </p>
             <p className="mt-1 text-muted-foreground">{lastFailure.message}</p>
-            {/* Storage quota is the failure a user can actually act on, and
-                deleting a machine is what frees its snapshot. */}
-            {lastFailure.status === 402 ? (
-              <p className="mt-1 text-muted-foreground">
-                Stopped machines keep a filesystem snapshot, which counts
-                towards this quota. Deleting machines you no longer need frees
-                it — stopping alone does not.
-              </p>
-            ) : null}
             <div className="mt-2 flex items-center gap-2">
               <Button
                 variant="outline"
