@@ -10,7 +10,7 @@
     "name": "Cloud Sandbox",
     "description": "Run code and commands in an isolated Vercel Sandbox microVM.",
     "branding": {
-      "icon": "Zap"
+      "icon": "Cloud"
     },
     "server": "./server.ts",
     "app": "./app.tsx"

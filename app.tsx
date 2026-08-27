@@ -327,7 +327,7 @@ export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "cloud-sandbox",
     title: "Cloud Sandbox",
-    icon: "Zap",
+    icon: "Cloud",
     // Routed at /plugins/cloud-sandbox/cloud-sandbox.
     path: "cloud-sandbox",
     component: SandboxPage,

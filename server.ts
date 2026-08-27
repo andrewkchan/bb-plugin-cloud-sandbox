@@ -11,7 +11,6 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { inferScope } from "@vercel/sandbox/dist/auth/index.js";
 import {
-  DEFAULT_CLIENT_ID,
   pollForSession,
   refreshSession,
   revokeToken,
@@ -109,11 +108,6 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Vercel session (managed by Sign in with Vercel)",
       secret: true,
     },
-    oauthClientId: {
-      type: "string",
-      label: "OAuth client ID (blank uses the Vercel SDK's own client)",
-      default: "",
-    },
     defaultRuntime: {
       type: "select",
       label: "Default runtime",
@@ -122,8 +116,11 @@ export default async function plugin(bb: BbPluginApi) {
     },
     sandboxTimeoutSeconds: {
       type: "string",
-      label: "Sandbox timeout (seconds)",
-      default: "300",
+      // Vercel caps sandbox lifetime at 45 minutes on Hobby and 24 hours on
+      // Pro/Enterprise; exceeding it fails sandbox creation outright. Default
+      // to the Hobby ceiling, which every plan accepts.
+      label: "Sandbox timeout (seconds; max 2700 on Hobby, 86400 on Pro)",
+      default: "2700",
     },
   });
 
@@ -137,12 +134,6 @@ export default async function plugin(bb: BbPluginApi) {
   let lastAuthError: string | null = null;
   /** De-duplicates concurrent refreshes so two runs cannot race. */
   let refreshInFlight: Promise<StoredSession> | null = null;
-
-  async function readClientId(): Promise<string> {
-    const { oauthClientId } = await settings.get();
-    const trimmed = oauthClientId.trim();
-    return trimmed === "" ? DEFAULT_CLIENT_ID : trimmed;
-  }
 
   async function readStoredSession(): Promise<StoredSession | null> {
     const { vercelSession } = await settings.get();
@@ -235,8 +226,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (stored.refreshToken === null) return stored;
 
     refreshInFlight ??= (async () => {
-      const clientId = await readClientId();
-      const refreshed = await refreshSession(stored.refreshToken!, clientId);
+      const refreshed = await refreshSession(stored.refreshToken!);
       const next: StoredSession = { ...stored, ...refreshed };
       await writeStoredSession(next);
       return next;
@@ -275,7 +265,7 @@ export default async function plugin(bb: BbPluginApi) {
             },
       defaultRuntime: values.defaultRuntime as RuntimeName,
       sandboxTimeoutMs:
-        Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 300_000,
+        Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 2_700_000,
     };
   }
 
@@ -286,7 +276,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Drive a sign-in to completion in the background. */
-  function beginSignIn(authorization: DeviceAuthorization, clientId: string) {
+  function beginSignIn(authorization: DeviceAuthorization) {
     const controller = new AbortController();
     pending = { authorization, controller };
     lastAuthError = null;
@@ -295,7 +285,7 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         const session = await pollForSession(
           authorization,
-          clientId,
+          undefined,
           controller.signal,
         );
         const stored = await resolveScope(session);
@@ -321,9 +311,8 @@ export default async function plugin(bb: BbPluginApi) {
   async function startSignIn() {
     if (pending !== null) return describeAuth();
     if ((await readStoredSession()) !== null) return describeAuth();
-    const clientId = await readClientId();
-    const authorization = await startDeviceAuthorization(clientId);
-    beginSignIn(authorization, clientId);
+    const authorization = await startDeviceAuthorization();
+    beginSignIn(authorization);
     return describeAuth();
   }
 
@@ -334,9 +323,7 @@ export default async function plugin(bb: BbPluginApi) {
     const stored = await readStoredSession();
     if (stored !== null) {
       // Best effort: a failed revocation must not strand the local session.
-      await revokeToken(stored.accessToken, await readClientId()).catch(
-        () => undefined,
-      );
+      await revokeToken(stored.accessToken).catch(() => undefined);
       await writeStoredSession(null);
     }
     return describeAuth();

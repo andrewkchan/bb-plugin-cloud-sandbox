@@ -28,10 +28,14 @@ Everything is optional and lives in the plugin's settings page.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `oauthClientId` | Vercel SDK's client | Set this to your own registered Vercel OAuth client for a branded consent screen |
 | `defaultRuntime` | `node` | Runtime preselected on the page |
-| `sandboxTimeoutSeconds` | `300` | Sandbox and command timeout |
+| `sandboxTimeoutSeconds` | `2700` | Sandbox and command timeout |
 | `vercelSession` | — | Managed by the sign-in flow; do not edit by hand |
+
+Vercel caps sandbox lifetime at **45 minutes on Hobby** and 24 hours on
+Pro/Enterprise, with exceeding it failing sandbox creation outright
+(`timeout should be <= 45m`). The default is the Hobby ceiling, which every
+plan accepts; raise it if your team is on Pro.
 
 ## Verifying the sandbox without bb
 
@@ -71,8 +75,9 @@ bb plugin logs cloud-sandbox -f
   sandbox keeps billing until its own timeout fires.
 - `auth.ts` implements the device grant directly rather than calling
   `@vercel/sandbox`'s `OAuth()`, whose client id is a module constant with no
-  parameter or env override. Doing it directly keeps `oauthClientId`
-  swappable.
+  parameter or env override. Every function here takes an optional client id,
+  so pointing the plugin at your own registered Vercel integration means
+  changing `DEFAULT_CLIENT_ID` in `auth.ts`.
 - The access token and refresh token live in a single `secret` setting, so
   they are stored in the plugin's 0600 secrets directory rather than in
   `bb.db`. They are written through `bb.sdk.plugins.updateSettings`, because a
