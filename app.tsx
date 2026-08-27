@@ -12,10 +12,46 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { AuthStatus, DebugEvent, MachineView, rpcContract } from "./server";
 import { Button } from "@/components/ui/button";
+import { Icon } from "@/components/ui/icon";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 
 /** Background refresh cadence while the page is open. */
 const POLL_MS = 45_000;
+
+type SortKey = "name" | "createdAt" | "lastUsedAt";
+type SortDirection = "asc" | "desc";
+type StatusFilter = "all" | MachineView["state"];
+
+const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "running", label: "Running" },
+  { id: "connecting", label: "Connecting" },
+  { id: "inactive", label: "Inactive" },
+  { id: "error", label: "Error" },
+];
+
+/** Status colours are semantic, not theme accents, so they are literal hues. */
+const DOT_STYLES: Record<MachineView["state"], string> = {
+  running: "bg-emerald-500",
+  connecting: "bg-amber-500",
+  inactive: "bg-muted-foreground/40",
+  error: "bg-destructive",
+};
+
+const STATE_STYLES: Record<MachineView["state"], string> = {
+  running: "text-foreground",
+  connecting: "text-muted-foreground",
+  inactive: "text-muted-foreground",
+  error: "text-destructive",
+};
 
 function Spinner({ className }: { className?: string }) {
   return (
@@ -29,60 +65,80 @@ function Spinner({ className }: { className?: string }) {
   );
 }
 
-const STATE_STYLES: Record<MachineView["state"], string> = {
-  running: "text-foreground",
-  connecting: "text-muted-foreground",
-  inactive: "text-muted-foreground",
-  error: "text-destructive",
-};
-
-function MachineRow({
-  machine,
-  onStop,
-  onRemove,
-  busy,
-}: {
-  machine: MachineView;
-  onStop: () => void;
-  onRemove: () => void;
-  busy: boolean;
-}) {
-  // Stopping keeps the machine listed so it can be woken; removing forgets it.
-  const isOff = machine.state === "inactive" || machine.state === "error";
+function StatusCell({ machine }: { machine: MachineView }) {
   return (
-    <li className="flex items-center gap-3 rounded-lg border border-border p-3">
-      <div className="min-w-0 flex-1">
-        {/* The sandbox name is the one identifier this plugin owns. bb's host
-            name is the container's hostname, which a resumed sandbox may not
-            keep, so it is not the title. */}
-        <p className="truncate text-sm font-medium">{machine.name}</p>
-        <p
-          className={cn(
-            "mt-0.5 flex items-center gap-1.5 text-xs",
-            STATE_STYLES[machine.state],
-          )}
-        >
-          {machine.state === "connecting" ? <Spinner /> : null}
-          {machine.status}
-        </p>
-        {machine.hostId !== null ? (
-          <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-            {machine.hostId}
-            {machine.hostName === null ? null : ` · ${machine.hostName}`}
-          </p>
-        ) : null}
-      </div>
-      {/* Remove deletes the sandbox and its snapshots outright, so it carries
-          the destructive treatment; stopping is reversible and does not. */}
-      <Button
-        variant={isOff ? "destructive" : "outline"}
-        size="sm"
-        onClick={isOff ? onRemove : onStop}
-        disabled={busy}
+    <span
+      className={cn("flex items-center gap-2 text-xs", STATE_STYLES[machine.state])}
+    >
+      {machine.state === "connecting" ? (
+        <Spinner className="size-3" />
+      ) : (
+        <span
+          aria-hidden
+          className={cn("size-2 shrink-0 rounded-full", DOT_STYLES[machine.state])}
+        />
+      )}
+      {machine.status}
+    </span>
+  );
+}
+
+/** Compact absolute timestamp; the full value is in the title attribute. */
+function formatDate(ms: number | null): string {
+  if (ms === null) return "—";
+  return new Date(ms).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function DateCell({ ms }: { ms: number | null }) {
+  return (
+    <span
+      className="text-xs text-muted-foreground"
+      title={ms === null ? undefined : new Date(ms).toISOString()}
+    >
+      {formatDate(ms)}
+    </span>
+  );
+}
+
+function SortableHead({
+  label,
+  column,
+  sort,
+  onSort,
+  className,
+}: {
+  label: string;
+  column: SortKey;
+  sort: { key: SortKey; direction: SortDirection };
+  onSort: (key: SortKey) => void;
+  className?: string;
+}) {
+  const active = sort.key === column;
+  return (
+    <TableHead className={className}>
+      <button
+        type="button"
+        onClick={() => onSort(column)}
+        className="flex items-center gap-1 font-medium hover:text-foreground"
+        aria-sort={
+          active
+            ? sort.direction === "asc"
+              ? "ascending"
+              : "descending"
+            : "none"
+        }
       >
-        {busy ? "Working…" : isOff ? "Remove" : "Stop"}
-      </Button>
-    </li>
+        {label}
+        <span aria-hidden className={cn("text-xs", active ? "" : "opacity-0")}>
+          {sort.direction === "asc" ? "\u2191" : "\u2193"}
+        </span>
+      </button>
+    </TableHead>
   );
 }
 
@@ -148,6 +204,11 @@ function MachinesPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [busyName, setBusyName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<StatusFilter>("all");
+  const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
+    key: "createdAt",
+    direction: "desc",
+  });
   const inFlight = useRef(false);
 
   const refetch = useCallback(
@@ -185,8 +246,6 @@ function MachinesPage() {
     return () => clearInterval(timer);
   }, [refetch]);
 
-  // Creation and disconnect detection both publish, so the list reacts
-  // immediately rather than waiting out the poll interval.
   useRealtime("machines-changed", () => refetch());
 
   const create = () => {
@@ -216,19 +275,41 @@ function MachinesPage() {
     );
   };
 
+  const toggleSort = (key: SortKey) => {
+    setSort((current) =>
+      current.key === key
+        ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+        : // Names read naturally A-Z; dates read naturally newest first.
+          { key, direction: key === "name" ? "asc" : "desc" },
+    );
+  };
+
+  const visible = (machines ?? [])
+    .filter((machine) => filter === "all" || machine.state === filter)
+    .slice()
+    .sort((left, right) => {
+      const factor = sort.direction === "asc" ? 1 : -1;
+      if (sort.key === "name") return factor * left.name.localeCompare(right.name);
+      // A machine that never connected has no last-used time; sort it last
+      // whichever way the column is pointing.
+      const a = sort.key === "createdAt" ? left.createdAt : left.lastUsedAt;
+      const b = sort.key === "createdAt" ? right.createdAt : right.lastUsedAt;
+      if (a === null) return 1;
+      if (b === null) return -1;
+      return factor * (a - b);
+    });
+
   return (
     <div className="h-full overflow-auto p-4 md:p-5">
-      <div className="mx-auto w-full max-w-3xl space-y-4">
-        <div className="flex items-center gap-2">
+      <div className="mx-auto w-full max-w-4xl space-y-4">
+        <div className="flex flex-wrap items-center gap-2">
           <Button size="sm" onClick={create} disabled={creating || !signedIn}>
             {creating ? (
-              <>
-                <Spinner className="mr-2" />
-                Creating…
-              </>
+              <Spinner className="mr-2" />
             ) : (
-              "Create cloud machine"
+              <Icon name="Plus" className="mr-1.5 size-4" aria-hidden />
             )}
+            {creating ? "Creating…" : "Create cloud machine"}
           </Button>
           <Button
             variant="outline"
@@ -237,6 +318,11 @@ function MachinesPage() {
             onClick={() => refetch(true)}
             disabled={refreshing}
           >
+            <Icon
+              name="RotateCcw"
+              className={cn("mr-1.5 size-4", refreshing && "animate-spin")}
+              aria-hidden
+            />
             {refreshing ? "Refreshing…" : "Refresh"}
           </Button>
         </div>
@@ -255,6 +341,26 @@ function MachinesPage() {
           <p className="text-sm text-destructive">{error}</p>
         ) : null}
 
+        <div className="flex flex-wrap items-center gap-1">
+          {STATUS_FILTERS.map((option) => {
+            const count =
+              option.id === "all"
+                ? (machines ?? []).length
+                : (machines ?? []).filter((m) => m.state === option.id).length;
+            return (
+              <Button
+                key={option.id}
+                variant={filter === option.id ? "default" : "outline"}
+                size="sm"
+                onClick={() => setFilter(option.id)}
+              >
+                {option.label}
+                <span className="ml-1.5 opacity-60">{count}</span>
+              </Button>
+            );
+          })}
+        </div>
+
         {machines === null ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : machines.length === 0 ? (
@@ -263,17 +369,98 @@ function MachinesPage() {
             a machine you can run threads on.
           </p>
         ) : (
-          <ul className="space-y-2">
-            {machines.map((machine) => (
-              <MachineRow
-                key={machine.name}
-                machine={machine}
-                busy={busyName === machine.name}
-                onStop={() => act("machines_stop", machine.name)}
-                onRemove={() => act("machines_remove", machine.name)}
-              />
-            ))}
-          </ul>
+          // Capped height with its own scroll so a long list cannot push the
+          // debug log off the page.
+          <div className="max-h-[26rem] overflow-auto rounded-lg border border-border">
+            <Table>
+              <TableHeader className="sticky top-0 z-10 [&_th]:bg-card">
+                <TableRow>
+                  <SortableHead
+                    label="Machine"
+                    column="name"
+                    sort={sort}
+                    onSort={toggleSort}
+                  />
+                  <TableHead>Status</TableHead>
+                  <SortableHead
+                    label="Created"
+                    column="createdAt"
+                    sort={sort}
+                    onSort={toggleSort}
+                  />
+                  <SortableHead
+                    label="Last used"
+                    column="lastUsedAt"
+                    sort={sort}
+                    onSort={toggleSort}
+                  />
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {visible.length === 0 ? (
+                  <TableRow>
+                    <TableCell
+                      colSpan={5}
+                      className="text-center text-xs text-muted-foreground"
+                    >
+                      No machines with that status.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  visible.map((machine) => {
+                    const isOff =
+                      machine.state === "inactive" || machine.state === "error";
+                    const busy = busyName === machine.name;
+                    return (
+                      <TableRow key={machine.name}>
+                        <TableCell className="max-w-[16rem]">
+                          <p className="truncate text-sm font-medium">
+                            {machine.name}
+                          </p>
+                          {machine.hostId !== null ? (
+                            <p className="truncate font-mono text-xs text-muted-foreground">
+                              {machine.hostId}
+                              {machine.hostName === null
+                                ? null
+                                : ` · ${machine.hostName}`}
+                            </p>
+                          ) : null}
+                        </TableCell>
+                        <TableCell>
+                          <StatusCell machine={machine} />
+                        </TableCell>
+                        <TableCell>
+                          <DateCell ms={machine.createdAt} />
+                        </TableCell>
+                        <TableCell>
+                          <DateCell ms={machine.lastUsedAt} />
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {/* Remove deletes the sandbox and its snapshots
+                              outright, so it carries the destructive
+                              treatment; stopping is reversible. */}
+                          <Button
+                            variant={isOff ? "destructive" : "outline"}
+                            size="sm"
+                            onClick={() =>
+                              act(
+                                isOff ? "machines_remove" : "machines_stop",
+                                machine.name,
+                              )
+                            }
+                            disabled={busy}
+                          >
+                            {busy ? "Working…" : isOff ? "Remove" : "Stop"}
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })
+                )}
+              </TableBody>
+            </Table>
+          </div>
         )}
 
         <DebugLog />

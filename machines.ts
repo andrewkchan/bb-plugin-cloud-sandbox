@@ -28,6 +28,8 @@ export interface MachineSandbox {
   status: "pending" | "running" | "stopping" | "stopped" | "failed" | "aborted" | "snapshotting";
   /** Epoch ms. */
   createdAt: number;
+  /** Epoch ms the sandbox last changed state, per Vercel. */
+  updatedAt: number;
   /** Configured lifetime in ms, if the API reported one. */
   timeoutMs: number | null;
 }
@@ -146,6 +148,7 @@ export async function listMachines(
       name: entry.name,
       status: entry.status,
       createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
       timeoutMs: entry.timeout ?? null,
     }))
     .sort((a, b) => b.createdAt - a.createdAt);

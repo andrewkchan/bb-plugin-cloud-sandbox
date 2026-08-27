@@ -100,6 +100,11 @@ const machineViewSchema = z.object({
   /** Milliseconds the sandbox has been up, when running. */
   uptimeMs: z.number().nullable(),
   createdAt: z.number(),
+  /**
+   * When bb last heard from the machine, falling back to when Vercel last
+   * changed the sandbox's state for a machine that never connected.
+   */
+  lastUsedAt: z.number().nullable(),
   error: z.string().nullable(),
 });
 export type MachineView = z.infer<typeof machineViewSchema>;
@@ -439,6 +444,9 @@ export default async function plugin(bb: BbPluginApi) {
       const record = recordByName.get(sandbox.name) ?? null;
       const host = record === null ? null : (hostById.get(record.hostId) ?? null);
       const uptimeMs = Date.now() - sandbox.createdAt;
+      // bb's view of when the machine was last alive is more meaningful than
+      // Vercel's, but only exists once the daemon has connected at least once.
+      const lastUsedAt = host?.lastSeenAt ?? sandbox.updatedAt;
 
       if (sandbox.status === "failed" || sandbox.status === "aborted") {
         return {
@@ -449,6 +457,7 @@ export default async function plugin(bb: BbPluginApi) {
           status: `Error (${sandbox.status})`,
           uptimeMs: null,
           createdAt: sandbox.createdAt,
+          lastUsedAt,
           error: `Sandbox ${sandbox.status}`,
         };
       }
@@ -461,6 +470,7 @@ export default async function plugin(bb: BbPluginApi) {
           status: "Inactive",
           uptimeMs: null,
           createdAt: sandbox.createdAt,
+          lastUsedAt,
           error: null,
         };
       }
@@ -475,6 +485,7 @@ export default async function plugin(bb: BbPluginApi) {
           status: `Running for ${formatUptime(uptimeMs)}`,
           uptimeMs,
           createdAt: sandbox.createdAt,
+          lastUsedAt,
           error: null,
         };
       }
@@ -486,6 +497,7 @@ export default async function plugin(bb: BbPluginApi) {
         status: "Connecting",
         uptimeMs: null,
         createdAt: sandbox.createdAt,
+        lastUsedAt,
         error: null,
       };
     });

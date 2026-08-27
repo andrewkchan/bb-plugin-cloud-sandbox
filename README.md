@@ -5,8 +5,9 @@ into bb machines. Each "cloud machine" is a sandbox that installs bb and
 enrols itself over bb connect, so it appears alongside your local machines and
 can run threads. The interface is entirely graphical.
 
-- **Cloud Machines page** — list machines with live status, create one, stop
-  or remove one, refresh, and a collapsible debug log.
+- **Cloud Machines page** — a table of machines with status, created and
+  last-used times, sortable by name or either date and filterable by status,
+  plus create/stop/remove, manual refresh, and a collapsible debug log.
 - **Settings → Vercel account** — one **Sign in with Vercel** button.
 
 ## Setup
@@ -148,6 +149,12 @@ building native modules, so a new machine sits at `Connecting` for a while.
 - A row is titled by its **sandbox name**, with the bb host id as a subtitle.
   The sandbox name is the one identifier this plugin owns; bb's host *name*
   is the container's hostname, which a resumed sandbox may not keep.
+- "Last used" is bb's `lastSeenAt` for the machine's host — when bb last heard
+  from the daemon — falling back to Vercel's sandbox `updatedAt` for a machine
+  that never connected. A machine with no last-used time sorts last in either
+  direction rather than jumping between ends of the table.
+- The table is capped at 26rem and scrolls, with a sticky header, so a long
+  list cannot push the debug log off the page.
 - The page polls every 45s while it is open, and the interval is cleared on
   unmount. Overlapping refreshes are suppressed so a slow list cannot stack
   up behind the timer.
