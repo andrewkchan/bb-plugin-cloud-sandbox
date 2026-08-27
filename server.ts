@@ -185,7 +185,8 @@ export const rpcContract = defineRpcContract({
   auth_cancel: { input: z.null(), output: authStatusSchema },
   auth_sign_out: { input: z.null(), output: authStatusSchema },
   machines_list: {
-    input: z.null(),
+    /** `force` bypasses the cache, for the page's manual Refresh. */
+    input: z.object({ force: z.boolean() }),
     output: z.object({
       machines: z.array(machineViewSchema),
       signedIn: z.boolean(),
@@ -197,6 +198,10 @@ export const rpcContract = defineRpcContract({
       readyImages: z.array(z.object({ id: z.string(), name: z.string() })),
       /** Which of those the create button uses unless told otherwise. */
       defaultImageId: z.string().nullable(),
+      /** When the returned data was actually fetched from Vercel. */
+      fetchedAt: z.number(),
+      /** True when this answer is stale and a refresh is already running. */
+      refreshing: z.boolean(),
       /**
        * The last background machine operation that failed. Create and wake
        * run detached, so without this their errors reach only the debug log
@@ -686,6 +691,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function writeRecords(records: MachineRecord[]): Promise<void> {
     await bb.storage.kv.set("machines", records);
+    invalidateMachines();
     bb.realtime.publish(MACHINES_CHANGED, { count: records.length });
   }
 
@@ -717,6 +723,57 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Derive the list the page renders, from Vercel plus bb's host registry. */
+  /**
+   * Listing machines costs a Vercel round trip for the sandbox list plus two
+   * more per running machine for its session start, so it runs over a second
+   * and grows with the fleet. The page mounts fresh every time its panel is
+   * opened, which made every visit pay that again.
+   *
+   * Answers are cached and served stale while a refresh runs behind them, so
+   * a revisit paints immediately and the page says it is refreshing.
+   */
+  const MACHINES_TTL_MS = 30_000;
+  type MachinesSnapshot = Awaited<ReturnType<typeof describeMachines>>;
+  let machinesCache: { value: MachinesSnapshot; at: number } | null = null;
+  let machinesRefresh: Promise<void> | null = null;
+
+  /** Drop the cache so the next read reflects a change this plugin just made. */
+  function invalidateMachines(): void {
+    machinesCache = null;
+  }
+
+  function refreshMachinesInBackground(): void {
+    machinesRefresh ??= describeMachines()
+      .then((value) => {
+        machinesCache = { value, at: Date.now() };
+        bb.realtime.publish(MACHINES_CHANGED, {});
+      })
+      .catch((error: unknown) => {
+        // Keep serving the previous answer; the next read tries again.
+        bb.log.warn(
+          `machine refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      })
+      .finally(() => {
+        machinesRefresh = null;
+      });
+  }
+
+  async function readMachines(force: boolean) {
+    if (force || machinesCache === null) {
+      const value = await describeMachines();
+      machinesCache = { value, at: Date.now() };
+      return { ...value, fetchedAt: machinesCache.at, refreshing: false };
+    }
+    const age = Date.now() - machinesCache.at;
+    if (age > MACHINES_TTL_MS) refreshMachinesInBackground();
+    return {
+      ...machinesCache.value,
+      fetchedAt: machinesCache.at,
+      refreshing: age > MACHINES_TTL_MS,
+    };
+  }
+
   async function describeMachines(): Promise<{
     machines: MachineView[];
     signedIn: boolean;
@@ -953,6 +1010,7 @@ export default async function plugin(bb: BbPluginApi) {
     lastFailure = null;
     const ticket = randomUUID().slice(0, 8);
     creating.add(ticket);
+    invalidateMachines();
     bb.realtime.publish(MACHINES_CHANGED, {});
 
     void (async () => {
@@ -1008,6 +1066,7 @@ export default async function plugin(bb: BbPluginApi) {
         );
       } finally {
         creating.delete(ticket);
+        invalidateMachines();
         bb.realtime.publish(MACHINES_CHANGED, {});
       }
     })();
@@ -1025,6 +1084,7 @@ export default async function plugin(bb: BbPluginApi) {
     const credentials = await requireCredentials();
     lastFailure = null;
     waking.add(name);
+    invalidateMachines();
     bb.realtime.publish(MACHINES_CHANGED, {});
 
     void (async () => {
@@ -1051,6 +1111,7 @@ export default async function plugin(bb: BbPluginApi) {
         );
       } finally {
         waking.delete(name);
+        invalidateMachines();
         bb.realtime.publish(MACHINES_CHANGED, {});
       }
     })();
@@ -1123,6 +1184,7 @@ export default async function plugin(bb: BbPluginApi) {
       await writeRecords(records.filter((r) => r.name !== name));
     }
     await dismiss(name);
+    invalidateMachines();
     bb.realtime.publish(MACHINES_CHANGED, {});
     return true;
   }
@@ -1232,7 +1294,7 @@ export default async function plugin(bb: BbPluginApi) {
       return describeAuth();
     },
     auth_sign_out: () => signOut(),
-    machines_list: () => describeMachines(),
+    machines_list: ({ force }) => readMachines(force),
     machines_create: async ({ imageId }) => ({
       started: await startCreate(imageId),
     }),

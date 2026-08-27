@@ -52,6 +52,21 @@ import { cn } from "@/lib/utils";
 /** Background refresh cadence while the page is open. */
 const POLL_MS = 45_000;
 
+/**
+ * The last machine list seen in this window.
+ *
+ * A nav panel unmounts when you navigate away, so component state cannot
+ * survive a revisit. Holding it here lets the page paint its previous contents
+ * immediately and refresh behind them instead of showing "Loading…" again.
+ */
+let lastMachineSnapshot: {
+  machines: MachineView[];
+  readyImages: { id: string; name: string }[];
+  defaultImageId: string | null;
+  vercelUrl: string | null;
+  signedIn: boolean;
+} | null = null;
+
 type SortKey = "name" | "createdAt" | "lastUsedAt";
 type SortDirection = "asc" | "desc";
 type StatusFilter = "all" | MachineView["state"];
@@ -346,16 +361,28 @@ function DebugLog() {
 
 function MachinesPage() {
   const rpc = useRpc<typeof rpcContract>();
-  const [machines, setMachines] = useState<MachineView[] | null>(null);
-  const [signedIn, setSignedIn] = useState<boolean | null>(null);
+  const [machines, setMachines] = useState<MachineView[] | null>(
+    () => lastMachineSnapshot?.machines ?? null,
+  );
+  const [signedIn, setSignedIn] = useState<boolean | null>(
+    () => lastMachineSnapshot?.signedIn ?? null,
+  );
+  /** True while the server is refreshing a stale answer behind this one. */
+  const [refreshingInBackground, setRefreshingInBackground] = useState(false);
   const [creating, setCreating] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [busyName, setBusyName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<MachineView | null>(null);
-  const [vercelUrl, setVercelUrl] = useState<string | null>(null);
-  const [readyImages, setReadyImages] = useState<{ id: string; name: string }[]>([]);
-  const [defaultImageId, setDefaultImageId] = useState<string | null>(null);
+  const [vercelUrl, setVercelUrl] = useState<string | null>(
+    () => lastMachineSnapshot?.vercelUrl ?? null,
+  );
+  const [readyImages, setReadyImages] = useState<{ id: string; name: string }[]>(
+    () => lastMachineSnapshot?.readyImages ?? [],
+  );
+  const [defaultImageId, setDefaultImageId] = useState<string | null>(
+    () => lastMachineSnapshot?.defaultImageId ?? null,
+  );
   // The chevron picks which image the button will use; it does not create.
   // Until the user picks, the selection follows the server's default so a
   // refresh cannot silently change what the button would do.
@@ -386,7 +413,7 @@ function MachinesPage() {
       if (inFlight.current) return;
       inFlight.current = true;
       if (manual) setRefreshing(true);
-      rpc.call("machines_list").then(
+      rpc.call("machines_list", { force: manual }).then(
         (result) => {
           inFlight.current = false;
           setRefreshing(false);
@@ -397,6 +424,14 @@ function MachinesPage() {
           setReadyImages(result.readyImages);
           setDefaultImageId(result.defaultImageId);
           setLastFailure(result.lastFailure);
+          setRefreshingInBackground(result.refreshing);
+          lastMachineSnapshot = {
+            machines: result.machines,
+            readyImages: result.readyImages,
+            defaultImageId: result.defaultImageId,
+            vercelUrl: result.vercelUrl,
+            signedIn: result.signedIn,
+          };
           setError(null);
         },
         (cause: unknown) => {
@@ -573,6 +608,13 @@ function MachinesPage() {
             />
             {refreshing ? "Refreshing…" : "Refresh"}
           </Button>
+          {/* Subtle: the list on screen is usable, it is just not the newest. */}
+          {refreshingInBackground && !refreshing ? (
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Spinner className="size-3" />
+              Refreshing
+            </span>
+          ) : null}
         </div>
 
         {signedIn === false ? (

@@ -296,6 +296,18 @@ building native modules, so a new machine sits at `Connecting` for a while.
   direction rather than jumping between ends of the table.
 - The table is capped at 26rem and scrolls, with a sticky header, so a long
   list cannot push the debug log off the page.
+- Listing machines costs a Vercel round trip for the sandbox list plus two
+  more per *running* machine to read its session start, so a cold read takes
+  over a second and grows with the fleet. Answers are cached for 30s and
+  served **stale while a refresh runs behind them**: a cold read is ~1.4s, a
+  warm one ~4ms, and a stale one returns in ~50ms with `refreshing: true` so
+  the page can say so quietly. Anything the plugin changes drops the cache, so
+  acting on a machine never leaves a stale answer on screen. Manual Refresh
+  passes `force` and bypasses it entirely.
+- The nav panel unmounts when you navigate away, so the last answer is also
+  held in a module-level variable in the frontend. That lets a revisit paint
+  its previous contents at once rather than showing "Loading…" from scratch;
+  the server cache is what makes the refresh behind it cheap.
 - The page polls every 45s while it is open, and the interval is cleared on
   unmount. Overlapping refreshes are suppressed so a slow list cannot stack
   up behind the timer.
