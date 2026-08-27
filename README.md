@@ -6,7 +6,7 @@ enrols itself over bb connect, so it appears alongside your local machines and
 can run threads. The interface is entirely graphical.
 
 - **Cloud Machines page** — list machines with live status, create one, stop
-  one, refresh, and a collapsible debug log.
+  or remove one, refresh, and a collapsible debug log.
 - **Settings → Vercel account** — one **Sign in with Vercel** button.
 
 ## Setup
@@ -127,6 +127,15 @@ building native modules, so a new machine sits at `Connecting` for a while.
   invalidate them. A `disconnected` host is the correct state for a machine
   that is off but could come back — the same state bb shows for a sleeping
   laptop. Only an explicit **Remove** deletes the host and the record.
+- **Stop** and **Remove** are different operations. Stop ends the sandbox but
+  keeps the record and the bb host, so the machine stays listed as `Inactive`
+  and could be woken later. Remove is not reversible: it deletes the bb host,
+  which makes the credentials in the sandbox filesystem useless, drops the
+  local record, and hides the row.
+- Removing is the *only* way a row leaves the list. The list is derived from
+  `Sandbox.list()`, and Vercel keeps returning stopped sandboxes indefinitely,
+  so removed names are held in a bounded `dismissed` set in `bb.storage.kv`
+  and filtered out.
 - A row is titled by its **sandbox name**, with the bb host id as a subtitle.
   The sandbox name is the one identifier this plugin owns; bb's host *name*
   is the container's hostname, which a resumed sandbox may not keep.

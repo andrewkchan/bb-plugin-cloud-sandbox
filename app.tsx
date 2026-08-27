@@ -38,13 +38,17 @@ const STATE_STYLES: Record<MachineView["state"], string> = {
 
 function MachineRow({
   machine,
-  onDelete,
+  onStop,
+  onRemove,
   busy,
 }: {
   machine: MachineView;
-  onDelete: () => void;
+  onStop: () => void;
+  onRemove: () => void;
   busy: boolean;
 }) {
+  // Stopping keeps the machine listed so it can be woken; removing forgets it.
+  const isOff = machine.state === "inactive" || machine.state === "error";
   return (
     <li className="flex items-center gap-3 rounded-lg border border-border p-3">
       <div className="min-w-0 flex-1">
@@ -68,10 +72,13 @@ function MachineRow({
           </p>
         ) : null}
       </div>
-      <Button variant="outline" size="sm" onClick={onDelete} disabled={busy}>
-        {machine.state === "inactive" || machine.state === "error"
-          ? "Remove"
-          : "Stop"}
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={isOff ? onRemove : onStop}
+        disabled={busy}
+      >
+        {busy ? "Working…" : isOff ? "Remove" : "Stop"}
       </Button>
     </li>
   );
@@ -192,9 +199,10 @@ function MachinesPage() {
     );
   };
 
-  const remove = (name: string) => {
+  const act = (method: "machines_stop" | "machines_remove", name: string) => {
     setBusyName(name);
-    rpc.call("machines_delete", { name }).then(
+    setError(null);
+    rpc.call(method, { name }).then(
       () => {
         setBusyName(null);
         refetch();
@@ -259,7 +267,8 @@ function MachinesPage() {
                 key={machine.name}
                 machine={machine}
                 busy={busyName === machine.name}
-                onDelete={() => remove(machine.name)}
+                onStop={() => act("machines_stop", machine.name)}
+                onRemove={() => act("machines_remove", machine.name)}
               />
             ))}
           </ul>

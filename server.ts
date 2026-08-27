@@ -117,9 +117,15 @@ export const rpcContract = defineRpcContract({
     }),
   },
   machines_create: { input: z.null(), output: z.object({ started: z.boolean() }) },
-  machines_delete: {
+  /** End the sandbox but keep the machine listed, so it can be woken later. */
+  machines_stop: {
     input: z.object({ name: z.string().min(1) }),
-    output: z.object({ deleted: z.boolean() }),
+    output: z.object({ stopped: z.boolean() }),
+  },
+  /** Forget the machine entirely and hide its row. */
+  machines_remove: {
+    input: z.object({ name: z.string().min(1) }),
+    output: z.object({ removed: z.boolean() }),
   },
   events_list: {
     input: z.null(),
@@ -350,6 +356,17 @@ export default async function plugin(bb: BbPluginApi) {
 
   // -------------------------------------------------------------- machines
 
+  async function readDismissed(): Promise<string[]> {
+    return (await bb.storage.kv.get<string[]>("dismissed")) ?? [];
+  }
+  async function dismiss(name: string): Promise<void> {
+    const dismissed = await readDismissed();
+    if (dismissed.includes(name)) return;
+    // Bounded: Vercel never stops listing a stopped sandbox, but the set only
+    // needs to cover what it still returns.
+    await bb.storage.kv.set("dismissed", [name, ...dismissed].slice(0, 200));
+  }
+
   async function readRecords(): Promise<MachineRecord[]> {
     return (await bb.storage.kv.get<MachineRecord[]>("machines")) ?? [];
   }
@@ -401,11 +418,18 @@ export default async function plugin(bb: BbPluginApi) {
       projectId: session.projectId,
     };
 
-    const [sandboxes, records, hosts] = await Promise.all([
+    const [allSandboxes, records, hosts, dismissed] = await Promise.all([
       listMachines(credentials),
       readRecords(),
       bb.sdk.hosts.list(),
+      readDismissed(),
     ]);
+    // Vercel keeps listing stopped sandboxes forever, so a removed machine
+    // only disappears because this filter hides it.
+    const dismissedNames = new Set(dismissed);
+    const sandboxes = allSandboxes.filter(
+      (sandbox) => !dismissedNames.has(sandbox.name),
+    );
     const recordByName = new Map(records.map((r) => [r.name, r]));
     const hostById = new Map(hosts.map((h) => [h.id, h]));
 
@@ -556,20 +580,54 @@ export default async function plugin(bb: BbPluginApi) {
     return true;
   }
 
-  async function deleteMachine(name: string): Promise<boolean> {
+  /**
+   * End the sandbox, but keep the record and the bb host so the machine stays
+   * listed as Inactive and can be woken later.
+   */
+  async function stopMachineByName(name: string): Promise<boolean> {
     const credentials = await requireCredentials();
     await record("delete.requested", name, "Stopping machine.");
+    try {
+      await stopMachine(credentials, name);
+    } catch (error) {
+      // Already stopped is the common case and not a failure.
+      bb.log.info(
+        `stop ${name}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const records = await readRecords();
+    await writeRecords(
+      records.map((r) =>
+        r.name === name && r.disconnectedAt === null
+          ? { ...r, disconnectedAt: Date.now() }
+          : r,
+      ),
+    );
+    await record("machine.stopped", name, "Machine stopped.");
+    return true;
+  }
+
+  /**
+   * Forget the machine: stop it, drop its bb host registration, drop the local
+   * record, and hide the row. Unlike stopping, this is not reversible — the
+   * daemon's stored credentials become useless once the host is deleted.
+   */
+  async function removeMachineByName(name: string): Promise<boolean> {
+    const credentials = await requireCredentials();
+    await record("delete.requested", name, "Removing machine.");
     await stopMachine(credentials, name).catch(() => undefined);
 
     const records = await readRecords();
     const target = records.find((r) => r.name === name) ?? null;
     if (target !== null) {
-      // Drop the bb host registration too, so a dead machine does not linger
-      // in the machine picker.
-      await bb.sdk.hosts.delete({ hostId: target.hostId }).catch(() => undefined);
+      await bb.sdk.hosts
+        .delete({ hostId: target.hostId })
+        .catch(() => undefined);
       await writeRecords(records.filter((r) => r.name !== name));
     }
-    await record("machine.stopped", name, "Machine stopped.");
+    await dismiss(name);
+    bb.realtime.publish(MACHINES_CHANGED, {});
+    await record("machine.stopped", name, "Machine removed.");
     return true;
   }
 
@@ -590,8 +648,11 @@ export default async function plugin(bb: BbPluginApi) {
     auth_sign_out: () => signOut(),
     machines_list: () => describeMachines(),
     machines_create: async () => ({ started: await startCreate() }),
-    machines_delete: async ({ name }) => ({
-      deleted: await deleteMachine(name),
+    machines_stop: async ({ name }) => ({
+      stopped: await stopMachineByName(name),
+    }),
+    machines_remove: async ({ name }) => ({
+      removed: await removeMachineByName(name),
     }),
     events_list: async () => ({ events: await readEvents() }),
     events_clear: async () => {
