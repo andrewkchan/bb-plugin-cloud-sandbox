@@ -28,6 +28,7 @@ import {
   type EnrollmentDetails,
   type SandboxCredentials,
 } from "./machines.js";
+import { AGENT_PROVIDERS, isKnownCredentialKey } from "./agents.js";
 import {
   buildImage,
   DEFAULT_REPOSITORY,
@@ -56,11 +57,6 @@ const storedSessionSchema = z.object({
   projectSlug: z.string().nullable(),
 });
 type StoredSession = z.infer<typeof storedSessionSchema>;
-
-/** What the Agents tab shows. The token value itself is never sent. */
-const agentsStatusSchema = z.object({
-  claudeCodeTokenSet: z.boolean(),
-});
 
 const authStatusSchema = z.object({
   state: z.enum(["signed-out", "pending", "signed-in"]),
@@ -178,11 +174,6 @@ export type PluginBuild = z.infer<typeof buildSchema>;
 
 export const rpcContract = defineRpcContract({
   auth_status: { input: z.null(), output: authStatusSchema },
-  agents_status: { input: z.null(), output: agentsStatusSchema },
-  agents_set_claude_token: {
-    input: z.object({ token: z.string() }),
-    output: agentsStatusSchema,
-  },
   auth_start: { input: z.null(), output: authStatusSchema },
   auth_cancel: { input: z.null(), output: authStatusSchema },
   auth_sign_out: { input: z.null(), output: authStatusSchema },
@@ -276,6 +267,21 @@ export const rpcContract = defineRpcContract({
     input: z.object({ id: z.string() }),
     output: z.object({ deleted: z.boolean() }),
   },
+  /** Agent providers a template can hold credentials for. */
+  agent_providers: {
+    input: z.null(),
+    output: z.object({
+      providers: z.array(
+        z.object({
+          id: z.string(),
+          label: z.string(),
+          description: z.string(),
+          hint: z.string(),
+          credentials: z.array(z.object({ key: z.string(), label: z.string() })),
+        }),
+      ),
+    }),
+  },
   /** Which secrets a template holds. Values are never returned. */
   templates_secret_keys: {
     input: z.object({ templateId: z.string() }),
@@ -344,13 +350,6 @@ export default async function plugin(bb: BbPluginApi) {
     templateSecrets: {
       type: "string",
       label: "Template secrets (managed by the Templates tab)",
-      secret: true,
-    },
-    // Superseded by templateSecrets; read once at load to migrate, then
-    // cleared. Safe to delete once no install carries a value.
-    claudeCodeOauthToken: {
-      type: "string",
-      label: "Claude Code OAuth token (legacy — moved to templates)",
       secret: true,
     },
     machineVcpus: {
@@ -498,36 +497,6 @@ export default async function plugin(bb: BbPluginApi) {
       pluginId: bb.pluginId,
       values: { templateSecrets: JSON.stringify(all) },
     });
-  }
-
-  /**
-   * Move the old plugin-wide Claude Code token onto every template.
-   *
-   * The token used to apply to every machine, so applying it to every template
-   * preserves that behaviour exactly. Runs once: the legacy setting is cleared
-   * afterwards.
-   */
-  async function migrateLegacyClaudeToken(): Promise<void> {
-    const { claudeCodeOauthToken } = await settings.get();
-    const token = (claudeCodeOauthToken ?? "").trim();
-    if (token === "") return;
-    const all = await readAllSecrets();
-    for (const template of listTemplates()) {
-      all[template.id] = {
-        ...(all[template.id] ?? {}),
-        CLAUDE_CODE_OAUTH_TOKEN: token,
-      };
-    }
-    await bb.sdk.plugins.updateSettings({
-      pluginId: bb.pluginId,
-      values: {
-        templateSecrets: JSON.stringify(all),
-        claudeCodeOauthToken: "",
-      },
-    });
-    bb.log.info(
-      `migrated the plugin-wide Claude Code token onto ${listTemplates().length} template(s)`,
-    );
   }
 
   // ---------------------------------------------------------------- events
@@ -1370,19 +1339,6 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     auth_status: () => describeAuth(),
-    agents_status: async () => {
-      const { claudeCodeOauthToken } = await settings.get();
-      return { claudeCodeTokenSet: (claudeCodeOauthToken ?? "").trim() !== "" };
-    },
-    agents_set_claude_token: async ({ token }) => {
-      // Written through the settings route so it lands in the plugin's 0600
-      // secrets directory rather than bb.db. An empty string clears it.
-      await bb.sdk.plugins.updateSettings({
-        pluginId: bb.pluginId,
-        values: { claudeCodeOauthToken: token.trim() },
-      });
-      return { claudeCodeTokenSet: token.trim() !== "" };
-    },
     auth_start: () => startSignIn(),
     auth_cancel: async () => {
       pending?.controller.abort();
@@ -1479,10 +1435,18 @@ export default async function plugin(bb: BbPluginApi) {
       return { deleted: result.changes > 0 };
     },
     templates_build: async ({ id }) => ({ started: await startBuild(id) }),
+    agent_providers: () => ({ providers: AGENT_PROVIDERS }),
     templates_secret_keys: async ({ templateId }) => ({
       keys: Object.keys(await readSecrets(templateId)).sort(),
     }),
     templates_set_secret: async ({ templateId, key, value }) => {
+      // Only credentials a supported provider actually reads; an arbitrary
+      // key would be stored and injected while nothing ever consumed it.
+      if (!isKnownCredentialKey(key)) {
+        throw new Error(
+          `"${key}" is not a credential any agent provider reads.`,
+        );
+      }
       const secrets = await readSecrets(templateId);
       if (value.trim() === "") delete secrets[key];
       else secrets[key] = value.trim();
@@ -1525,20 +1489,6 @@ export default async function plugin(bb: BbPluginApi) {
       const cleared = (await readEvents()).length;
       await bb.storage.kv.set("events", []);
       return { cleared };
-    },
-  });
-
-  // The migration writes a setting this factory is still registering, and the
-  // settings route validates against the *active* descriptor set, so writing
-  // from inside the factory fails with `unknown setting`. A service runs once
-  // the registration is live.
-  bb.background.service("migrate-legacy-secrets", {
-    async start() {
-      await migrateLegacyClaudeToken().catch((error: unknown) => {
-        bb.log.warn(
-          `legacy Claude token migration failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
     },
   });
 

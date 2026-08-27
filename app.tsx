@@ -874,7 +874,7 @@ function BuildLog({ build, onBack }: { build: PluginBuild; onBack: () => void })
 }
 
 /**
- * Credentials a template injects when a machine is created.
+ * Credentials a template injects when a machine is created, by provider.
  *
  * Deliberately separate from the build-time variables above: those are baked
  * into the image and readable by anyone who can pull it, while these never
@@ -883,15 +883,29 @@ function BuildLog({ build, onBack }: { build: PluginBuild; onBack: () => void })
  */
 function TemplateSecrets({ templateId }: { templateId: string }) {
   const rpc = useRpc<typeof rpcContract>();
+  const [providers, setProviders] = useState<
+    {
+      id: string;
+      label: string;
+      description: string;
+      hint: string;
+      credentials: { key: string; label: string }[];
+    }[]
+  >([]);
   const [keys, setKeys] = useState<string[] | null>(null);
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const report = useCallback((cause: unknown) => {
-    setBusy(false);
+    setBusyKey(null);
     setError(cause instanceof Error ? cause.message : String(cause));
   }, []);
+
+  useEffect(() => {
+    rpc.call("agent_providers").then((r) => setProviders(r.providers), report);
+  }, [rpc, report]);
 
   useEffect(() => {
     rpc
@@ -899,23 +913,89 @@ function TemplateSecrets({ templateId }: { templateId: string }) {
       .then((r) => setKeys(r.keys), report);
   }, [rpc, templateId, report]);
 
-  const save = (value: string) => {
-    setBusy(true);
+  const save = (key: string, value: string) => {
+    setBusyKey(key);
     setError(null);
     rpc
-      .call("templates_set_secret", {
-        templateId,
-        key: "CLAUDE_CODE_OAUTH_TOKEN",
-        value,
-      })
+      .call("templates_set_secret", { templateId, key, value })
       .then((r) => {
-        setBusy(false);
+        setBusyKey(null);
         setKeys(r.keys);
-        setDraft("");
+        setDrafts((current) => ({ ...current, [key]: "" }));
       }, report);
   };
 
-  const tokenSet = keys?.includes("CLAUDE_CODE_OAUTH_TOKEN") ?? false;
+  const isSet = (key: string) => keys?.includes(key) ?? false;
+  const configuredCount = (provider: (typeof providers)[number]) =>
+    provider.credentials.filter((c) => isSet(c.key)).length;
+
+  const open = providers.find((provider) => provider.id === openId) ?? null;
+
+  if (open !== null) {
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setOpenId(null)}>
+            Back to agents
+          </Button>
+          <span className="text-xs font-medium">{open.label}</span>
+        </div>
+        <p className="text-xs text-muted-foreground">{open.hint}</p>
+        <ul className="space-y-2">
+          {open.credentials.map((credential) => (
+            <li key={credential.key} className="flex flex-wrap items-center gap-2">
+              <span className="w-40 shrink-0 text-xs">
+                {credential.label}
+                {isSet(credential.key) ? (
+                  <span className="ml-1.5 text-emerald-600 dark:text-emerald-500">
+                    ✓
+                  </span>
+                ) : null}
+              </span>
+              <Input
+                type="password"
+                value={drafts[credential.key] ?? ""}
+                onChange={(event) =>
+                  setDrafts((current) => ({
+                    ...current,
+                    [credential.key]: event.target.value,
+                  }))
+                }
+                placeholder={
+                  isSet(credential.key) ? "Replace the stored value" : credential.key
+                }
+                className="max-w-xs font-mono"
+                autoComplete="off"
+                aria-label={`${open.label} ${credential.label}`}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => save(credential.key, drafts[credential.key] ?? "")}
+                disabled={
+                  busyKey === credential.key ||
+                  (drafts[credential.key] ?? "").trim() === ""
+                }
+              >
+                {busyKey === credential.key ? "Saving…" : "Save"}
+              </Button>
+              {isSet(credential.key) ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => save(credential.key, "")}
+                  disabled={busyKey === credential.key}
+                >
+                  Clear
+                </Button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+        {error !== null ? <p className="text-destructive">{error}</p> : null}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-1.5">
@@ -923,43 +1003,43 @@ function TemplateSecrets({ templateId }: { templateId: string }) {
       <p className="text-xs text-muted-foreground">
         Injected into a machine&apos;s environment when it is created, not baked
         into the image, so they never land in a layer anyone who can pull it
-        could read. Only Claude Code is supported so far.
+        could read.
       </p>
-      <p className="text-xs text-muted-foreground">
-        Run <code className="font-mono">claude setup-token</code> on your own
-        machine for a long-lived token, injected as{" "}
-        <code className="font-mono">CLAUDE_CODE_OAUTH_TOKEN</code>.{" "}
-        {keys === null ? "…" : tokenSet ? "A token is set." : "No token set."}
-      </p>
-      <div className="flex flex-wrap items-center gap-2">
-        <Input
-          type="password"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder={tokenSet ? "Replace the stored token" : "Paste the token"}
-          className="max-w-sm font-mono"
-          autoComplete="off"
-          aria-label="Claude Code OAuth token"
-        />
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => save(draft)}
-          disabled={busy || draft.trim() === ""}
-        >
-          {busy ? "Saving…" : "Save token"}
-        </Button>
-        {tokenSet ? (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => save("")}
-            disabled={busy}
-          >
-            Clear
-          </Button>
-        ) : null}
-      </div>
+      <ul className="space-y-2">
+        {providers.map((provider) => {
+          const count = configuredCount(provider);
+          return (
+            <li key={provider.id}>
+              <button
+                type="button"
+                onClick={() => setOpenId(provider.id)}
+                className="flex w-full items-center gap-3 rounded-lg border border-border p-2.5 text-left hover:bg-card"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium">
+                    {provider.label}
+                  </span>
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {provider.description}
+                  </span>
+                </span>
+                {count > 0 ? (
+                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <span
+                      aria-hidden
+                      className="size-2 shrink-0 rounded-full bg-emerald-500"
+                    />
+                    Configured
+                    {provider.credentials.length > 1 ? ` (${count})` : ""}
+                  </span>
+                ) : (
+                  <span className="text-xs text-muted-foreground">Not set</span>
+                )}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
       {error !== null ? <p className="text-destructive">{error}</p> : null}
     </div>
   );

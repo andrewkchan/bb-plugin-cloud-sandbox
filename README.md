@@ -74,9 +74,12 @@ bb plugin logs cloud-sandbox -f
 
 ## Agent credentials
 
-Each template holds its own credentials, edited on its page. Claude Code takes
-a long-lived OAuth token from `claude setup-token`, injected into a machine's
-environment as `CLAUDE_CODE_OAUTH_TOKEN` **when the machine is created**.
+Each template holds its own credentials, edited on its page. They are listed
+by agent provider — Claude Code and pi.dev — each showing whether it is
+configured, and each opening to its own fields. Claude Code takes a long-lived
+OAuth token from `claude setup-token`; pi.dev takes an API key per model
+provider, which it reads from the matching environment variable. Everything set
+here is injected into a machine's environment **when the machine is created**.
 
 This is the distinction the template concept exists to draw. A build-time
 variable is baked into the image and readable by anyone who can pull it; a
@@ -87,8 +90,9 @@ the machine rather than sitting plugin-wide.
 Secrets are stored as one JSON secret setting keyed by template id, so they
 land in the plugin's 0600 secrets directory rather than its database. They are
 write-only from the UI: the backend reports which keys are set and never
-returns a value. Machines created before a credential is set do not receive
-it. Only Claude Code is supported so far.
+returns a value, and it refuses a key no supported provider reads, since that
+would be stored and injected while nothing ever consumed it. Machines created
+before a credential is set do not receive it.
 
 ## Templates
 

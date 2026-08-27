@@ -44,32 +44,6 @@ export interface ImagePreset {
   env: ImageEnvVar[];
 }
 
-/**
- * pi.dev reads a provider's key from the matching environment variable.
- * These are the API-key providers from its docs; the list is a starting
- * point, and unused rows can be deleted.
- *
- * @see https://pi.dev/docs/latest/providers#environment-variables-or-auth-file
- */
-const PI_PROVIDER_KEYS = [
-  "ANTHROPIC_API_KEY",
-  "OPENAI_API_KEY",
-  "GEMINI_API_KEY",
-  "OPENROUTER_API_KEY",
-  "GROQ_API_KEY",
-  "DEEPSEEK_API_KEY",
-  "MISTRAL_API_KEY",
-  "TOGETHER_API_KEY",
-  "CEREBRAS_API_KEY",
-  "FIREWORKS_API_KEY",
-  "BASETEN_API_KEY",
-  "NVIDIA_API_KEY",
-  "KIMI_API_KEY",
-  "MINIMAX_API_KEY",
-  "AZURE_OPENAI_API_KEY",
-  "AI_GATEWAY_API_KEY",
-];
-
 export const IMAGE_PRESETS: ImagePreset[] = [
   {
     id: "blank",
@@ -90,11 +64,11 @@ export const IMAGE_PRESETS: ImagePreset[] = [
   {
     id: "pi",
     label: "pi.dev",
-    description: "Installs the pi coding agent and lists provider API keys.",
+    description: "Installs the pi coding agent.",
     name: "pi.dev",
     // --ignore-scripts is what pi's own install instructions use.
     commands: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
-    env: PI_PROVIDER_KEYS.map((key) => ({ key, value: "" })),
+    env: [],
   },
 ];
 
