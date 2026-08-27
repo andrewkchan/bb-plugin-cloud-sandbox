@@ -762,7 +762,16 @@ function MachinesPage() {
                           </p>
                           {machine.hostId !== null ? (
                             <p className="truncate font-mono text-xs text-muted-foreground">
-                              {machine.hostId}
+                              {/* The host id is bb's own identity for this
+                                  machine, so it links to bb's page for it.
+                                  Present whenever the machine is still
+                                  enrolled, including while it is stopped. */}
+                              <UrlLink
+                                href={bbMachineHref(machine.hostId)}
+                                className="underline underline-offset-2 hover:text-foreground"
+                              >
+                                {machine.hostId}
+                              </UrlLink>
                               {machine.hostName === null
                                 ? null
                                 : ` · ${machine.hostName}`}
@@ -1559,6 +1568,14 @@ export const SETTINGS_TEMPLATES_HREF =
   "/settings/plugins/cloud-sandbox#templates";
 export const SETTINGS_AUTH_HREF =
   "/settings/plugins/cloud-sandbox#authentication";
+
+/**
+ * BB's own detail page for one enrolled machine, matching
+ * SETTINGS_MACHINE_ROUTE_PATH ("/settings/machines/:hostId").
+ */
+function bbMachineHref(hostId: string): string {
+  return `/settings/machines/${encodeURIComponent(hostId)}`;
+}
 
 const SETTINGS_TABS = ["templates", "authentication"] as const;
 

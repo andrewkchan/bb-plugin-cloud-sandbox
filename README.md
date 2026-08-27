@@ -305,6 +305,10 @@ building native modules, so a new machine sits at `Connecting` for a while.
   so removed names are held in a bounded `dismissed` set in `bb.storage.kv`
   and filtered out.
 - A row is titled by its **sandbox name**, with the bb host id as a subtitle.
+  The host id links to bb's own page for that machine
+  (`/settings/machines/<hostId>`, bb's `SETTINGS_MACHINE_ROUTE_PATH`), which
+  exists for as long as the machine is enrolled — including while it is
+  stopped, and not after it is deleted.
   The sandbox name is the one identifier this plugin owns; bb's host *name*
   is the container's hostname, which a resumed sandbox may not keep.
 - "Running for X" is measured from the machine's **current session**, not from
