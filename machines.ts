@@ -243,6 +243,21 @@ export async function destroyMachine(
   name: string,
 ): Promise<{ snapshotsDeleted: number; snapshotFailures: string[] }> {
   const sandbox = await Sandbox.get({ ...credentials, name });
+  return deleteSandboxWithSnapshots(sandbox, credentials);
+}
+
+/**
+ * Delete a sandbox and every snapshot belonging to it.
+ *
+ * Deleting a sandbox does NOT delete its snapshots: they outlive it and keep
+ * counting against Snapshots Storage with no sandbox left to reach them. Every
+ * path that disposes of a sandbox permanently — a deleted machine, a finished
+ * image build — has to come through here.
+ */
+export async function deleteSandboxWithSnapshots(
+  sandbox: Sandbox,
+  credentials: SandboxCredentials,
+): Promise<{ snapshotsDeleted: number; snapshotFailures: string[] }> {
   await sandbox.stop().catch(() => undefined);
 
   let snapshotsDeleted = 0;

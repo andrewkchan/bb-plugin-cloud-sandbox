@@ -8,7 +8,10 @@
 // Like machines.ts and auth.ts this module carries no bb dependency.
 import { Sandbox } from "@vercel/sandbox";
 import { z } from "zod";
-import type { SandboxCredentials } from "./machines.js";
+import {
+  deleteSandboxWithSnapshots,
+  type SandboxCredentials,
+} from "./machines.js";
 
 /** The registry every image is pushed to. */
 export const REGISTRY_HOST = "vcr.vercel.com";
@@ -199,8 +202,10 @@ export async function buildImage(
       log,
     };
   } finally {
-    await sandbox.stop().catch(() => undefined);
-    await sandbox.delete().catch(() => undefined);
+    // Stopping a sandbox produces a snapshot and deleting the sandbox does not
+    // remove it, so a build that only stopped and deleted its VM stranded
+    // roughly its own image size in Snapshots Storage every time.
+    await deleteSandboxWithSnapshots(sandbox, credentials).catch(() => undefined);
   }
 }
 

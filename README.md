@@ -181,6 +181,13 @@ building native modules, so a new machine sits at `Connecting` for a while.
 
 ## Notes
 
+- **Deleting a sandbox does not delete its snapshots.** They outlive it and go
+  on counting against Snapshots Storage with no sandbox left to reach them, and
+  `sandbox.listSnapshots()` cannot see them either — only a project-wide list
+  such as `vercel sandbox snapshots list` reveals them. Every path that
+  disposes of a sandbox permanently goes through `deleteSandboxWithSnapshots`,
+  including image builds, whose throwaway build VM stranded roughly its own
+  image size on every build until this was fixed.
 - Machines are created with `keepLastSnapshots: { count: 1 }`. Vercel appears
   to keep one snapshot per sandbox anyway, so this states the invariant the
   plugin relies on rather than saving anything; waking needs only the most
