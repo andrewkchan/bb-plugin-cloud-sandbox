@@ -117,7 +117,8 @@ building native modules, so a new machine sits at `Connecting` for a while.
   keeps the record and the bb host, so the machine stays listed as `Inactive`
   and could be woken later. Remove is not reversible: it deletes the Vercel
   sandbox and every snapshot belonging to it, deletes the bb host, drops the
-  local record, and hides the row. It is styled destructively for that reason.
+  local record, and hides the row. It is styled destructively and asks for
+  confirmation, naming exactly what will be deleted.
 - Deleting snapshots matters more than it looks. Stopping a sandbox can
   produce one even when `persistent` was never requested, and they are not
   small — a single machine left a 937 MB snapshot behind during development.
@@ -127,6 +128,10 @@ building native modules, so a new machine sits at `Connecting` for a while.
   sandbox. `delete()` leaves the instance inert, so listing snapshots
   afterwards would throw. A snapshot that will not delete is reported in the
   debug log rather than blocking the rest of the removal.
+- The confirmation uses `Dialog`, not `AlertDialog`. bb's vendored Dialog
+  renders through `ResponsiveDrawerShell`, so it becomes a bottom drawer on
+  compact viewports; the registry's AlertDialog has no such treatment, and
+  bb's UI guidance requires the responsive drawer for every compact dialog.
 - Removing is the *only* way a row leaves the list. The list is derived from
   `Sandbox.list()`, and Vercel keeps returning stopped sandboxes indefinitely,
   so removed names are held in a bounded `dismissed` set in `bb.storage.kv`

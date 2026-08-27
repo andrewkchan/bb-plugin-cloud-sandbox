@@ -12,6 +12,14 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { AuthStatus, DebugEvent, MachineView, rpcContract } from "./server";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Icon } from "@/components/ui/icon";
 import {
   Table,
@@ -142,6 +150,72 @@ function SortableHead({
   );
 }
 
+/**
+ * Removal deletes the sandbox, its snapshots and the bb host registration, so
+ * it asks first and spells out what goes.
+ *
+ * This uses Dialog rather than AlertDialog deliberately: bb's vendored Dialog
+ * renders through ResponsiveDrawerShell, so it becomes a bottom drawer on
+ * compact viewports. The registry's AlertDialog has no such treatment.
+ */
+function RemoveMachineDialog({
+  machine,
+  onCancel,
+  onConfirm,
+  busy,
+}: {
+  machine: MachineView | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+  busy: boolean;
+}) {
+  return (
+    <Dialog
+      open={machine !== null}
+      onOpenChange={(open) => {
+        if (!open) onCancel();
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Remove this cloud machine?</DialogTitle>
+          <DialogDescription asChild>
+            <div className="space-y-2">
+              <p>
+                <span className="font-mono">{machine?.name}</span> will be
+                permanently deleted. This cannot be undone.
+              </p>
+              <ul className="list-disc space-y-0.5 pl-4">
+                <li>The Vercel sandbox is deleted</li>
+                <li>Its snapshots are deleted, so it can never be woken</li>
+                <li>Its machine registration is removed from bb</li>
+              </ul>
+              <p>
+                To keep the machine so it can be started again later, cancel and
+                use <span className="font-medium">Stop</span> instead.
+              </p>
+            </div>
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          {/* Cancel first so it takes initial focus, not the destructive action. */}
+          <Button variant="outline" size="sm" onClick={onCancel} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {busy ? "Removing…" : "Remove machine"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function DebugLog() {
   const rpc = useRpc<typeof rpcContract>();
   const [open, setOpen] = useState(false);
@@ -204,6 +278,7 @@ function MachinesPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [busyName, setBusyName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<MachineView | null>(null);
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
     key: "createdAt",
@@ -266,10 +341,12 @@ function MachinesPage() {
     rpc.call(method, { name }).then(
       () => {
         setBusyName(null);
+        setConfirming(null);
         refetch();
       },
       (cause: unknown) => {
         setBusyName(null);
+        // Keep the dialog open on failure so the error is not hidden behind it.
         setError(cause instanceof Error ? cause.message : String(cause));
       },
     );
@@ -443,12 +520,10 @@ function MachinesPage() {
                           <Button
                             variant={isOff ? "destructive" : "outline"}
                             size="sm"
-                            onClick={() =>
-                              act(
-                                isOff ? "machines_remove" : "machines_stop",
-                                machine.name,
-                              )
-                            }
+                            onClick={() => {
+                              if (isOff) setConfirming(machine);
+                              else act("machines_stop", machine.name);
+                            }}
                             disabled={busy}
                           >
                             {busy ? "Working…" : isOff ? "Remove" : "Stop"}
@@ -465,6 +540,15 @@ function MachinesPage() {
 
         <DebugLog />
       </div>
+
+      <RemoveMachineDialog
+        machine={confirming}
+        busy={confirming !== null && busyName === confirming.name}
+        onCancel={() => setConfirming(null)}
+        onConfirm={() => {
+          if (confirming !== null) act("machines_remove", confirming.name);
+        }}
+      />
     </div>
   );
 }
