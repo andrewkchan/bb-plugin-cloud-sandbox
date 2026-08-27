@@ -332,6 +332,13 @@ building native modules, so a new machine sits at `Connecting` for a while.
   held in a module-level variable in the frontend. That lets a revisit paint
   its previous contents at once rather than showing "Loading…" from scratch;
   the server cache is what makes the refresh behind it cheap.
+- Being signed out is deliberately **not** reported through
+  `bb.status.needsConfiguration`. BB only loads a plugin's frontend while its
+  status is exactly `running`
+  (`apps/app/src/lib/plugin-frontend.ts`), so that status removes every slot
+  the plugin registers — the Cloud Machines nav entry, and the settings
+  section holding the **Sign in with Vercel** button that a signed-out user
+  needs to reach. The page reports the state itself and links to that tab.
 - The page polls every 45s while it is open, and the interval is cleared on
   unmount. Overlapping refreshes are suppressed so a slow list cannot stack
   up behind the timer.

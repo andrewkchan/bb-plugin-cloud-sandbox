@@ -1254,11 +1254,13 @@ export default async function plugin(bb: BbPluginApi) {
     return true;
   }
 
-  if ((await readStoredSession()) === null) {
-    bb.status.needsConfiguration(
-      "Not signed in to Vercel. Use Sign in with Vercel on this plugin's settings page.",
-    );
-  }
+  // Being signed out is deliberately NOT reported as needs-configuration. BB
+  // only loads a plugin's frontend while its status is exactly "running"
+  // (apps/app/src/lib/plugin-frontend.ts), so that status would remove the
+  // Cloud Machines nav entry and every other slot — including the settings
+  // section holding the Sign in with Vercel button, which is the one thing a
+  // signed-out user needs to reach. The page reports the signed-out state
+  // itself and links to that settings tab.
 
   /**
    * Run a build to completion in the background.

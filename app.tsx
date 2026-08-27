@@ -512,6 +512,32 @@ function MachinesPage() {
       return factor * (a - b);
     });
 
+  if (signedIn === false) {
+    return (
+      <div className="h-full overflow-auto p-4 md:p-5">
+        <div className="mx-auto w-full max-w-4xl">
+          <div className="rounded-lg border border-border p-4 text-sm">
+            <p className="font-medium">Not signed in to Vercel.</p>
+            <p className="mt-1 text-muted-foreground">
+              Cloud machines run on Vercel Sandboxes. Connect an account to
+              create one.
+            </p>
+            <Button size="sm" className="mt-3" asChild>
+              <UrlLink href={SETTINGS_AUTH_HREF}>
+                Sign in with Vercel
+                <Icon
+                  name="ExternalLink"
+                  className="ml-1.5 size-3.5 opacity-60"
+                  aria-hidden
+                />
+              </UrlLink>
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="h-full overflow-auto p-4 md:p-5">
       <div className="mx-auto w-full max-w-4xl space-y-4">
@@ -616,22 +642,6 @@ function MachinesPage() {
             </span>
           ) : null}
         </div>
-
-        {signedIn === false ? (
-          <div className="rounded-lg border border-border p-3 text-sm">
-            <p className="font-medium">Not signed in to Vercel.</p>
-            <p className="mt-1 text-muted-foreground">
-              Use <span className="font-medium">Sign in with Vercel</span> on{" "}
-              <UrlLink
-                href={SETTINGS_AUTH_HREF}
-                className="underline underline-offset-2 hover:text-foreground"
-              >
-                this plugin&apos;s settings page
-              </UrlLink>{" "}
-              to connect your account.
-            </p>
-          </div>
-        ) : null}
 
         {error !== null ? (
           <p className="text-sm text-destructive">{error}</p>
