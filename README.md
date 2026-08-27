@@ -6,8 +6,9 @@ enrols itself over bb connect, so it appears alongside your local machines and
 can run threads. The interface is entirely graphical.
 
 - **Cloud Machines page** — a table of machines with status, created and
-  last-used times, sortable by name or either date and filterable by status,
-  plus create/stop/remove, manual refresh, and a collapsible debug log.
+  last-used times, sortable by name or either date and filterable by status.
+  Each row has a menu to wake, stop or delete it; plus create, manual refresh,
+  a link to the project's sandboxes on vercel.com, and a collapsible debug log.
 - **Settings → Vercel account** — one **Sign in with Vercel** button.
 
 ## Setup
@@ -113,12 +114,29 @@ building native modules, so a new machine sits at `Connecting` for a while.
   invalidate them. A `disconnected` host is the correct state for a machine
   that is off but could come back — the same state bb shows for a sleeping
   laptop. Only an explicit **Remove** deletes the host and the record.
-- **Stop** and **Remove** are different operations. Stop ends the sandbox but
+- **Waking** resumes a stopped machine. Vercel restores the microVM from its
+  snapshot, and because that snapshot carries memory as well as disk, the host
+  daemon usually comes back on its own — with the same bb host id, since the
+  durable credentials in `~/.bb-machines` survive. The wake script relaunches
+  the daemon only if the restore did not bring it back, so a cold disk-only
+  restore still reconnects. It discovers the data directory on disk rather
+  than deriving it from a server URL, because bb connect can mint a different
+  tunnel URL than the machine originally enrolled against.
+- Row actions live in one menu and stay visible when they do not apply, so the
+  menu reads the same for every row. Wake is enabled only for `Inactive`
+  (a `failed`/`aborted` sandbox has no session to resume) and Stop only for
+  `Running`/`Connecting`.
+- **Stop** and **Delete** are different operations. Stop ends the sandbox but
   keeps the record and the bb host, so the machine stays listed as `Inactive`
-  and could be woken later. Remove is not reversible: it deletes the Vercel
+  and can be woken later. Delete is not reversible: it deletes the Vercel
   sandbox and every snapshot belonging to it, deletes the bb host, drops the
   local record, and hides the row. It is styled destructively and asks for
   confirmation, naming exactly what will be deleted.
+- The "View on Vercel" link is `https://vercel.com/<teamSlug>/<project>/sandboxes`.
+  `inferScope` returns a slug-shaped `projectId` for the default project, which
+  is what that path wants; an explicitly linked project supplies a real
+  `projectSlug` instead. Without a team slug the link is hidden rather than
+  guessed.
 - Deleting snapshots matters more than it looks. Stopping a sandbox can
   produce one even when `persistent` was never requested, and they are not
   small — a single machine left a 937 MB snapshot behind during development.

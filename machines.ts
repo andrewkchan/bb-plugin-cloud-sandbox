@@ -215,6 +215,69 @@ export async function destroyMachine(
   return { snapshotsDeleted, snapshotFailures };
 }
 
+/**
+ * Bring a stopped machine back.
+ *
+ * Resuming restores the microVM from its snapshot, and because that snapshot
+ * carries memory as well as disk, the host daemon usually comes back running
+ * on its own — with the same hostId, since the durable credentials in
+ * ~/.bb-machines survive too. This script is the belt-and-braces half: it
+ * relaunches the daemon only if the restore did not bring it back, so a cold
+ * disk-only restore still reconnects.
+ *
+ * Everything it needs is already on disk. The data directory is discovered
+ * rather than derived from a server URL, because bb connect can mint a
+ * different tunnel URL than the one the machine originally enrolled against.
+ */
+export function buildWakeScript(): string {
+  return [
+    "set -e",
+    'DATA=$(find "$HOME/.bb-machines" -maxdepth 1 -mindepth 1 -type d ! -name host-daemon-ports | head -1)',
+    '[ -n "$DATA" ] || { echo "no bb enrollment found in this sandbox"; exit 1; }',
+    'if pgrep -f "bb-app host-daemon" >/dev/null 2>&1; then echo "daemon already running"; exit 0; fi',
+    "SERVER=$(node -e \"console.log(require('$DATA/config.json').serverUrl)\")",
+    'PORT=$(cat "$DATA/host-daemon-port" 2>/dev/null || echo 38888)',
+    'BB_APP_NPM_PREFIX="$DATA/npm" BB_DATA_DIR="$DATA" nohup "$DATA/npm/bin/bb-app" host-daemon --auto-update --host-daemon-port "$PORT" --server-url "$SERVER" >> "$DATA/wake.log" 2>&1 &',
+    "sleep 3",
+    'pgrep -f "bb-app host-daemon" >/dev/null 2>&1 && echo "daemon relaunched" || { echo "daemon did not start; see $DATA/wake.log"; exit 1; }',
+  ].join("\n");
+}
+
+/**
+ * Resume a stopped machine and make sure its bb daemon is running again.
+ *
+ * `resume: true` starts the session up front rather than waiting for the
+ * first command to trigger it, so a failure to resume surfaces here.
+ */
+export async function wakeMachine(
+  credentials: SandboxCredentials,
+  name: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const sandbox = await Sandbox.get({
+    ...credentials,
+    name,
+    resume: true,
+    ...(signal === undefined ? {} : { signal }),
+  });
+  const finished = await sandbox.runCommand({
+    cmd: "bash",
+    args: ["-lc", buildWakeScript()],
+    timeoutMs: 5 * 60_000,
+    ...(signal === undefined ? {} : { signal }),
+  });
+  const [stdout, stderr] = await Promise.all([
+    finished.stdout(),
+    finished.stderr(),
+  ]);
+  if (finished.exitCode !== 0) {
+    throw new Error(
+      `Wake failed (exit ${finished.exitCode}). ${lastMeaningfulLine(`${stdout}\n${stderr}`)}`,
+    );
+  }
+  return lastMeaningfulLine(stdout);
+}
+
 /** Stop one machine's sandbox. Safe to call on an already-stopped sandbox. */
 export async function stopMachine(
   credentials: SandboxCredentials,

@@ -22,6 +22,7 @@ import {
   destroyMachine,
   listMachines,
   stopMachine,
+  wakeMachine,
   type EnrollmentDetails,
   type SandboxCredentials,
 } from "./machines.js";
@@ -69,6 +70,9 @@ const eventSchema = z.object({
     "machine.disconnected",
     "machine.stopped",
     "machine.deleted",
+    "machine.woken",
+    "wake.requested",
+    "wake.failed",
     "delete.requested",
   ]),
   /** Sandbox name, once one exists. */
@@ -105,6 +109,8 @@ const machineViewSchema = z.object({
    * changed the sandbox's state for a machine that never connected.
    */
   lastUsedAt: z.number().nullable(),
+  /** True while this machine is being woken. */
+  waking: z.boolean(),
   error: z.string().nullable(),
 });
 export type MachineView = z.infer<typeof machineViewSchema>;
@@ -121,9 +127,16 @@ export const rpcContract = defineRpcContract({
       signedIn: z.boolean(),
       /** True while a create is in flight, so the page can show a spinner. */
       creating: z.boolean(),
+      /** Deep link to this project's sandboxes on vercel.com, when derivable. */
+      vercelUrl: z.string().nullable(),
     }),
   },
   machines_create: { input: z.null(), output: z.object({ started: z.boolean() }) },
+  /** Resume a stopped machine and bring its bb daemon back. */
+  machines_wake: {
+    input: z.object({ name: z.string().min(1) }),
+    output: z.object({ started: z.boolean() }),
+  },
   /** End the sandbox but keep the machine listed, so it can be woken later. */
   machines_stop: {
     input: z.object({ name: z.string().min(1) }),
@@ -184,6 +197,8 @@ export default async function plugin(bb: BbPluginApi) {
   let refreshInFlight: Promise<StoredSession> | null = null;
   /** In-flight machine creations, by a temporary id until the sandbox exists. */
   const creating = new Set<string>();
+  /** Sandbox names currently being woken. */
+  const waking = new Set<string>();
 
   // ---------------------------------------------------------------- events
 
@@ -374,6 +389,22 @@ export default async function plugin(bb: BbPluginApi) {
     await bb.storage.kv.set("dismissed", [name, ...dismissed].slice(0, 200));
   }
 
+  /**
+   * Deep link to the project's sandboxes on vercel.com.
+   *
+   * inferScope returns a slug-shaped projectId for the default project
+   * ("vercel-sandbox-default-project"), which is what the dashboard path
+   * wants; an explicitly linked project supplies a real projectSlug instead.
+   * Without a team slug there is no path to build, so this returns null rather
+   * than guessing.
+   */
+  function buildVercelUrl(session: StoredSession): string | null {
+    if (session.teamSlug === null || session.teamSlug === "") return null;
+    const project = session.projectSlug ?? session.projectId;
+    if (project === "") return null;
+    return `https://vercel.com/${encodeURIComponent(session.teamSlug)}/${encodeURIComponent(project)}/sandboxes`;
+  }
+
   async function readRecords(): Promise<MachineRecord[]> {
     return (await bb.storage.kv.get<MachineRecord[]>("machines")) ?? [];
   }
@@ -414,10 +445,16 @@ export default async function plugin(bb: BbPluginApi) {
     machines: MachineView[];
     signedIn: boolean;
     creating: boolean;
+    vercelUrl: string | null;
   }> {
     const session = await ensureFreshSession();
     if (session === null) {
-      return { machines: [], signedIn: false, creating: creating.size > 0 };
+      return {
+        machines: [],
+        signedIn: false,
+        creating: creating.size > 0,
+        vercelUrl: null,
+      };
     }
     const credentials: SandboxCredentials = {
       token: session.accessToken,
@@ -458,6 +495,7 @@ export default async function plugin(bb: BbPluginApi) {
           uptimeMs: null,
           createdAt: sandbox.createdAt,
           lastUsedAt,
+          waking: waking.has(sandbox.name),
           error: `Sandbox ${sandbox.status}`,
         };
       }
@@ -471,6 +509,7 @@ export default async function plugin(bb: BbPluginApi) {
           uptimeMs: null,
           createdAt: sandbox.createdAt,
           lastUsedAt,
+          waking: waking.has(sandbox.name),
           error: null,
         };
       }
@@ -486,6 +525,7 @@ export default async function plugin(bb: BbPluginApi) {
           uptimeMs,
           createdAt: sandbox.createdAt,
           lastUsedAt,
+          waking: waking.has(sandbox.name),
           error: null,
         };
       }
@@ -498,6 +538,7 @@ export default async function plugin(bb: BbPluginApi) {
         uptimeMs: null,
         createdAt: sandbox.createdAt,
         lastUsedAt,
+        waking: waking.has(sandbox.name),
         error: null,
       };
     });
@@ -510,7 +551,12 @@ export default async function plugin(bb: BbPluginApi) {
       await noteDisconnect(view);
     }
 
-    return { machines: views, signedIn: true, creating: creating.size > 0 };
+    return {
+      machines: views,
+      signedIn: true,
+      creating: creating.size > 0,
+      vercelUrl: buildVercelUrl(session),
+    };
   }
 
   /**
@@ -591,6 +637,43 @@ export default async function plugin(bb: BbPluginApi) {
       }
     })();
 
+    return true;
+  }
+
+  /**
+   * Resume a stopped machine in the background. The page shows the row as
+   * waking meanwhile; the machine returns to Running once its daemon has
+   * reconnected, which the ordinary status derivation picks up.
+   */
+  async function startWake(name: string): Promise<boolean> {
+    if (waking.has(name)) return false;
+    const credentials = await requireCredentials();
+    waking.add(name);
+    bb.realtime.publish(MACHINES_CHANGED, {});
+
+    void (async () => {
+      try {
+        await record("wake.requested", name, "Waking machine.");
+        const detail = await wakeMachine(credentials, name);
+        // A resumed machine is live again, so clear the disconnect marker.
+        const records = await readRecords();
+        await writeRecords(
+          records.map((r) =>
+            r.name === name ? { ...r, disconnectedAt: null } : r,
+          ),
+        );
+        await record("machine.woken", name, detail);
+      } catch (error) {
+        await record(
+          "wake.failed",
+          name,
+          error instanceof Error ? error.message : String(error),
+        );
+      } finally {
+        waking.delete(name);
+        bb.realtime.publish(MACHINES_CHANGED, {});
+      }
+    })();
     return true;
   }
 
@@ -681,6 +764,7 @@ export default async function plugin(bb: BbPluginApi) {
     auth_sign_out: () => signOut(),
     machines_list: () => describeMachines(),
     machines_create: async () => ({ started: await startCreate() }),
+    machines_wake: async ({ name }) => ({ started: await startWake(name) }),
     machines_stop: async ({ name }) => ({
       stopped: await stopMachineByName(name),
     }),

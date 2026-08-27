@@ -20,6 +20,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Icon } from "@/components/ui/icon";
 import {
   Table,
@@ -151,14 +158,69 @@ function SortableHead({
 }
 
 /**
- * Removal deletes the sandbox, its snapshots and the bb host registration, so
+ * Deleting removes the sandbox, its snapshots and the bb host registration, so
  * it asks first and spells out what goes.
  *
  * This uses Dialog rather than AlertDialog deliberately: bb's vendored Dialog
  * renders through ResponsiveDrawerShell, so it becomes a bottom drawer on
  * compact viewports. The registry's AlertDialog has no such treatment.
  */
-function RemoveMachineDialog({
+/**
+ * Every row action lives here. Actions that do not apply to the machine's
+ * current state stay visible but disabled, so the menu reads the same way for
+ * every row rather than shifting entries around.
+ */
+function MachineActions({
+  machine,
+  busy,
+  onStop,
+  onWake,
+  onRemove,
+}: {
+  machine: MachineView;
+  busy: boolean;
+  onStop: () => void;
+  onWake: () => void;
+  onRemove: () => void;
+}) {
+  const isOff = machine.state === "inactive" || machine.state === "error";
+  // A sandbox that failed or aborted has no session to resume.
+  const canWake = machine.state === "inactive" && !machine.waking;
+  const canStop = machine.state === "running" || machine.state === "connecting";
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          aria-label={`Actions for ${machine.name}`}
+        >
+          {busy ? <Spinner className="size-3.5" /> : "\u22ef"}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem disabled={!canWake} onSelect={onWake}>
+          {machine.waking ? "Waking…" : "Wake up"}
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled={!canStop} onSelect={onStop}>
+          Stop
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          variant="destructive"
+          disabled={machine.waking}
+          onSelect={onRemove}
+        >
+          Delete
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function DeleteMachineDialog({
   machine,
   onCancel,
   onConfirm,
@@ -178,7 +240,7 @@ function RemoveMachineDialog({
     >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Remove this cloud machine?</DialogTitle>
+          <DialogTitle>Delete this cloud machine?</DialogTitle>
           <DialogDescription asChild>
             <div className="space-y-2">
               <p>
@@ -191,7 +253,7 @@ function RemoveMachineDialog({
                 <li>Its machine registration is removed from bb</li>
               </ul>
               <p>
-                To keep the machine so it can be started again later, cancel and
+                To keep the machine so it can be woken again later, cancel and
                 use <span className="font-medium">Stop</span> instead.
               </p>
             </div>
@@ -208,7 +270,7 @@ function RemoveMachineDialog({
             onClick={onConfirm}
             disabled={busy}
           >
-            {busy ? "Removing…" : "Remove machine"}
+            {busy ? "Deleting…" : "Delete machine"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -279,6 +341,7 @@ function MachinesPage() {
   const [busyName, setBusyName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<MachineView | null>(null);
+  const [vercelUrl, setVercelUrl] = useState<string | null>(null);
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
     key: "createdAt",
@@ -299,6 +362,7 @@ function MachinesPage() {
           setMachines(result.machines);
           setSignedIn(result.signedIn);
           setCreating(result.creating);
+          setVercelUrl(result.vercelUrl);
           setError(null);
         },
         (cause: unknown) => {
@@ -335,7 +399,10 @@ function MachinesPage() {
     );
   };
 
-  const act = (method: "machines_stop" | "machines_remove", name: string) => {
+  const act = (
+    method: "machines_stop" | "machines_remove" | "machines_wake",
+    name: string,
+  ) => {
     setBusyName(name);
     setError(null);
     rpc.call(method, { name }).then(
@@ -388,10 +455,18 @@ function MachinesPage() {
             )}
             {creating ? "Creating…" : "Create cloud machine"}
           </Button>
+          {vercelUrl === null ? null : (
+            <UrlLink
+              href={vercelUrl}
+              className="ml-auto text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+            >
+              View on Vercel
+            </UrlLink>
+          )}
           <Button
             variant="outline"
             size="sm"
-            className="ml-auto"
+            className={vercelUrl === null ? "ml-auto" : undefined}
             onClick={() => refetch(true)}
             disabled={refreshing}
           >
@@ -486,8 +561,6 @@ function MachinesPage() {
                   </TableRow>
                 ) : (
                   visible.map((machine) => {
-                    const isOff =
-                      machine.state === "inactive" || machine.state === "error";
                     const busy = busyName === machine.name;
                     return (
                       <TableRow key={machine.name}>
@@ -514,20 +587,13 @@ function MachinesPage() {
                           <DateCell ms={machine.lastUsedAt} />
                         </TableCell>
                         <TableCell className="text-right">
-                          {/* Remove deletes the sandbox and its snapshots
-                              outright, so it carries the destructive
-                              treatment; stopping is reversible. */}
-                          <Button
-                            variant={isOff ? "destructive" : "outline"}
-                            size="sm"
-                            onClick={() => {
-                              if (isOff) setConfirming(machine);
-                              else act("machines_stop", machine.name);
-                            }}
-                            disabled={busy}
-                          >
-                            {busy ? "Working…" : isOff ? "Remove" : "Stop"}
-                          </Button>
+                          <MachineActions
+                            machine={machine}
+                            busy={busy}
+                            onStop={() => act("machines_stop", machine.name)}
+                            onWake={() => act("machines_wake", machine.name)}
+                            onRemove={() => setConfirming(machine)}
+                          />
                         </TableCell>
                       </TableRow>
                     );
@@ -541,7 +607,7 @@ function MachinesPage() {
         <DebugLog />
       </div>
 
-      <RemoveMachineDialog
+      <DeleteMachineDialog
         machine={confirming}
         busy={confirming !== null && busyName === confirming.name}
         onCancel={() => setConfirming(null)}
