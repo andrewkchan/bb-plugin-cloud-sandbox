@@ -4,7 +4,7 @@
 // Like auth.ts this module carries no bb dependency; the caller supplies the
 // enrollment details it obtained from bb.
 import { randomUUID } from "node:crypto";
-import { Sandbox, Snapshot } from "@vercel/sandbox";
+import { APIError, Sandbox, Snapshot } from "@vercel/sandbox";
 
 /**
  * Explicit Vercel API credentials. `@vercel/sandbox` requires all three or
@@ -23,6 +23,33 @@ export interface SandboxCredentials {
  * in the same Vercel project.
  */
 export const MACHINE_NAME_PREFIX = "bb-machine-";
+
+/** A failure from the Vercel API, separated from the plugin's own errors. */
+export interface SandboxFailure {
+  message: string;
+  /** HTTP status when Vercel rejected the request; null for local failures. */
+  status: number | null;
+}
+
+/**
+ * Normalise an error into something worth showing a user.
+ *
+ * Vercel's own message carries the useful detail (quota names, reset dates),
+ * but the SDK prefixes it with "Status code N is not ok:", which repeats the
+ * status the caller already has.
+ */
+export function describeSandboxError(error: unknown): SandboxFailure {
+  if (error instanceof APIError) {
+    return {
+      message: error.message.replace(/^Status code \d+ is not ok:\s*/u, ""),
+      status: error.response.status,
+    };
+  }
+  return {
+    message: error instanceof Error ? error.message : String(error),
+    status: null,
+  };
+}
 
 /** What bb needs the machine to know in order to enroll itself. */
 export interface EnrollmentDetails {

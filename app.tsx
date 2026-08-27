@@ -359,6 +359,12 @@ function MachinesPage() {
   // The chevron picks which image the button will use; it does not create.
   // Until the user picks, the selection follows the server's default so a
   // refresh cannot silently change what the button would do.
+  const [lastFailure, setLastFailure] = useState<{
+    action: "create" | "wake";
+    message: string;
+    status: number | null;
+    at: number;
+  } | null>(null);
   const [pickedImageId, setPickedImageId] = useState<string | null>(null);
   const [hasPicked, setHasPicked] = useState(false);
   const selectedImageId = hasPicked ? pickedImageId : defaultImageId;
@@ -390,6 +396,7 @@ function MachinesPage() {
           setVercelUrl(result.vercelUrl);
           setReadyImages(result.readyImages);
           setDefaultImageId(result.defaultImageId);
+          setLastFailure(result.lastFailure);
           setError(null);
         },
         (cause: unknown) => {
@@ -591,6 +598,52 @@ function MachinesPage() {
 
         {error !== null ? (
           <p className="text-sm text-destructive">{error}</p>
+        ) : null}
+
+        {lastFailure !== null ? (
+          <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm">
+            <p className="font-medium text-destructive">
+              {lastFailure.action === "create"
+                ? "Could not create a cloud machine"
+                : "Could not wake a cloud machine"}
+              {lastFailure.status === null ? null : ` (${lastFailure.status})`}
+            </p>
+            <p className="mt-1 text-muted-foreground">{lastFailure.message}</p>
+            {/* Storage quota is the failure a user can actually act on, and
+                deleting a machine is what frees its snapshot. */}
+            {lastFailure.status === 402 ? (
+              <p className="mt-1 text-muted-foreground">
+                Stopped machines keep a filesystem snapshot, which counts
+                towards this quota. Deleting machines you no longer need frees
+                it — stopping alone does not.
+              </p>
+            ) : null}
+            <div className="mt-2 flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  rpc.call("machines_dismiss_failure").then(
+                    () => setLastFailure(null),
+                    (cause: unknown) =>
+                      setError(
+                        cause instanceof Error ? cause.message : String(cause),
+                      ),
+                  )
+                }
+              >
+                Dismiss
+              </Button>
+              {vercelUrl === null ? null : (
+                <UrlLink
+                  href={vercelUrl}
+                  className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                >
+                  Manage on Vercel
+                </UrlLink>
+              )}
+            </div>
+          </div>
         ) : null}
 
         <div className="flex flex-wrap items-center gap-1">

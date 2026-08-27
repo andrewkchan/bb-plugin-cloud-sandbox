@@ -22,6 +22,7 @@ import {
   destroyMachine,
   fetchSessionStarts,
   listMachines,
+  describeSandboxError,
   stopMachine,
   wakeMachine,
   type EnrollmentDetails,
@@ -188,6 +189,20 @@ export const rpcContract = defineRpcContract({
       readyImages: z.array(z.object({ id: z.string(), name: z.string() })),
       /** Which of those the create button uses unless told otherwise. */
       defaultImageId: z.string().nullable(),
+      /**
+       * The last background machine operation that failed. Create and wake
+       * run detached, so without this their errors reach only the debug log
+       * and the button appears to do nothing.
+       */
+      lastFailure: z
+        .object({
+          action: z.enum(["create", "wake"]),
+          message: z.string(),
+          /** HTTP status when Vercel rejected it; null for local failures. */
+          status: z.number().nullable(),
+          at: z.number(),
+        })
+        .nullable(),
     }),
   },
   machines_create: {
@@ -198,6 +213,10 @@ export const rpcContract = defineRpcContract({
   machines_wake: {
     input: z.object({ name: z.string().min(1) }),
     output: z.object({ started: z.boolean() }),
+  },
+  machines_dismiss_failure: {
+    input: z.null(),
+    output: z.object({ dismissed: z.boolean() }),
   },
   /** End the sandbox but keep the machine listed, so it can be woken later. */
   machines_stop: {
@@ -299,6 +318,13 @@ export default async function plugin(bb: BbPluginApi) {
   const creating = new Set<string>();
   /** Sandbox names currently being woken. */
   const waking = new Set<string>();
+  /** The last detached machine operation that failed, for the page to show. */
+  let lastFailure: {
+    action: "create" | "wake";
+    message: string;
+    status: number | null;
+    at: number;
+  } | null = null;
 
   // Images and their build logs live in the plugin's own SQLite rather than
   // kv: a build log routinely exceeds the 256KB kv value cap.
@@ -638,6 +664,7 @@ export default async function plugin(bb: BbPluginApi) {
     vercelUrl: string | null;
     readyImages: { id: string; name: string }[];
     defaultImageId: string | null;
+    lastFailure: typeof lastFailure;
   }> {
     const session = await ensureFreshSession();
     const readyImages = listImages()
@@ -653,6 +680,7 @@ export default async function plugin(bb: BbPluginApi) {
         vercelUrl: null,
         readyImages,
         defaultImageId,
+        lastFailure,
       };
     }
     const credentials: SandboxCredentials = {
@@ -781,6 +809,7 @@ export default async function plugin(bb: BbPluginApi) {
       vercelUrl: buildVercelUrl(session),
       readyImages,
       defaultImageId,
+      lastFailure,
     };
   }
 
@@ -857,6 +886,8 @@ export default async function plugin(bb: BbPluginApi) {
       Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 2_700_000;
     const vcpus = Number.parseInt(values.machineVcpus, 10);
 
+    // A new attempt supersedes whatever the last one reported.
+    lastFailure = null;
     const ticket = randomUUID().slice(0, 8);
     creating.add(ticket);
     bb.realtime.publish(MACHINES_CHANGED, {});
@@ -903,9 +934,15 @@ export default async function plugin(bb: BbPluginApi) {
           "Machine enrolled and connected to bb.",
         );
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : String(error);
-        await record("create.failed", null, message);
+        const failure = describeSandboxError(error);
+        lastFailure = { action: "create", ...failure, at: Date.now() };
+        await record(
+          "create.failed",
+          null,
+          failure.status === null
+            ? failure.message
+            : `[${failure.status}] ${failure.message}`,
+        );
       } finally {
         creating.delete(ticket);
         bb.realtime.publish(MACHINES_CHANGED, {});
@@ -923,6 +960,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function startWake(name: string): Promise<boolean> {
     if (waking.has(name)) return false;
     const credentials = await requireCredentials();
+    lastFailure = null;
     waking.add(name);
     bb.realtime.publish(MACHINES_CHANGED, {});
 
@@ -939,10 +977,14 @@ export default async function plugin(bb: BbPluginApi) {
         );
         await record("machine.woken", name, detail);
       } catch (error) {
+        const failure = describeSandboxError(error);
+        lastFailure = { action: "wake", ...failure, at: Date.now() };
         await record(
           "wake.failed",
           name,
-          error instanceof Error ? error.message : String(error),
+          failure.status === null
+            ? failure.message
+            : `[${failure.status}] ${failure.message}`,
         );
       } finally {
         waking.delete(name);
@@ -1129,6 +1171,11 @@ export default async function plugin(bb: BbPluginApi) {
       started: await startCreate(imageId),
     }),
     machines_wake: async ({ name }) => ({ started: await startWake(name) }),
+    machines_dismiss_failure: () => {
+      const dismissed = lastFailure !== null;
+      lastFailure = null;
+      return { dismissed };
+    },
     machines_stop: async ({ name }) => ({
       stopped: await stopMachineByName(name),
     }),
