@@ -1,36 +1,43 @@
 // bb-plugin-cloud-sandbox — run code in a Vercel Sandbox from bb.
 //
-// One core (sandbox.ts) serves three surfaces: the Cloud Sandbox page
-// (app.tsx, over RPC), the `bb cloud-sandbox` CLI command that agents use,
-// and the skill in skills/cloud-sandbox/SKILL.md that tells them how.
-// Every run is appended to a bounded history in bb.storage.kv and announced
-// on a realtime channel so open pages refetch.
+// The interface is entirely graphical: a Cloud Sandbox page for running code
+// and a settings section for connecting a Vercel account. Authentication is
+// OAuth device authorization — the user clicks "Sign in with Vercel", approves
+// in the browser, and the plugin resolves (and if necessary creates) the Vercel
+// team and project itself. No CLI, no access token to copy, no ids to look up.
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { inferScope } from "@vercel/sandbox/dist/auth/index.js";
 import {
-  RUNTIMES,
+  DEFAULT_CLIENT_ID,
+  pollForSession,
+  refreshSession,
+  revokeToken,
+  startDeviceAuthorization,
+  type AuthSession,
+  type DeviceAuthorization,
+} from "./auth.js";
+import {
   runCode,
-  runInSandbox,
   type RuntimeName,
   type SandboxCredentials,
 } from "./sandbox.js";
 
-/** Per-stream output kept in history and returned over RPC. */
 const MAX_OUTPUT_CHARS = 20_000;
-/** How many past runs the history keeps. Bounded to stay under the kv cap. */
 const MAX_HISTORY = 25;
-/** Realtime channel app.tsx listens on. */
 const RUNS_CHANGED = "runs-changed";
+const AUTH_CHANGED = "auth-changed";
+/** Refresh this long before the access token actually expires. */
+const REFRESH_SKEW_MS = 60_000;
 
 const runtimeSchema = z.enum(["node", "python"]);
 
 const runRecordSchema = z.object({
   id: z.string(),
   startedAt: z.string(),
-  kind: z.enum(["code", "exec"]),
   runtime: runtimeSchema.nullable(),
-  /** The snippet for a `code` run, or the command line for an `exec` run. */
   input: z.string(),
   sandboxName: z.string(),
   exitCode: z.number(),
@@ -41,24 +48,42 @@ const runRecordSchema = z.object({
 });
 export type RunRecord = z.infer<typeof runRecordSchema>;
 
+/** Everything the sign-in flow persists, stored as one secret setting. */
+const storedSessionSchema = z.object({
+  accessToken: z.string(),
+  refreshToken: z.string().nullable(),
+  expiresAt: z.number(),
+  teamId: z.string(),
+  projectId: z.string(),
+  teamSlug: z.string().nullable(),
+  projectSlug: z.string().nullable(),
+});
+type StoredSession = z.infer<typeof storedSessionSchema>;
+
+const authStatusSchema = z.object({
+  state: z.enum(["signed-out", "pending", "signed-in"]),
+  /** Present while `state` is "pending". */
+  verificationUriComplete: z.string().nullable(),
+  userCode: z.string().nullable(),
+  /** Present once signed in. */
+  teamSlug: z.string().nullable(),
+  projectSlug: z.string().nullable(),
+  /** Set when the last sign-in attempt failed. */
+  error: z.string().nullable(),
+});
+
+export type AuthStatus = z.infer<typeof authStatusSchema>;
+
 export const rpcContract = defineRpcContract({
-  status: {
-    input: z.null(),
-    output: z.object({
-      configured: z.boolean(),
-      /** Which settings are still missing, for the UI to name them. */
-      missing: z.array(z.string()),
-      defaultRuntime: runtimeSchema,
-    }),
-  },
+  auth_status: { input: z.null(), output: authStatusSchema },
+  auth_start: { input: z.null(), output: authStatusSchema },
+  auth_cancel: { input: z.null(), output: authStatusSchema },
+  auth_sign_out: { input: z.null(), output: authStatusSchema },
   runs_list: {
     input: z.null(),
     output: z.object({ runs: z.array(runRecordSchema) }),
   },
-  runs_clear: {
-    input: z.null(),
-    output: z.object({ cleared: z.number() }),
-  },
+  runs_clear: { input: z.null(), output: z.object({ cleared: z.number() }) },
   run_code: {
     input: z.object({
       code: z.string().min(1).max(100_000),
@@ -76,24 +101,17 @@ function truncate(text: string): string {
 export default async function plugin(bb: BbPluginApi) {
   bb.log.info("loaded");
 
-  // A Vercel personal access token plus the team and project it acts on.
-  // @vercel/sandbox needs all three together; it otherwise falls back to a
-  // VERCEL_OIDC_TOKEN in the environment, which expires too quickly to be a
-  // sensible fit for a long-lived server, so this plugin asks for the token.
   const settings = bb.settings.define({
-    vercelToken: {
+    // Written by the sign-in flow, not by hand. It lives in a secret setting
+    // so it lands in the plugin's 0600 secrets directory rather than bb.db.
+    vercelSession: {
       type: "string",
-      label: "Vercel access token",
+      label: "Vercel session (managed by Sign in with Vercel)",
       secret: true,
     },
-    teamId: {
+    oauthClientId: {
       type: "string",
-      label: "Vercel team ID",
-      default: "",
-    },
-    projectId: {
-      type: "string",
-      label: "Vercel project ID",
+      label: "OAuth client ID (blank uses the Vercel SDK's own client)",
       default: "",
     },
     defaultRuntime: {
@@ -109,43 +127,123 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  /**
-   * Re-read settings on every run so a token edit takes effect without a
-   * plugin reload.
-   */
-  async function resolveConfig(): Promise<{
-    credentials: SandboxCredentials | undefined;
-    missing: string[];
-    defaultRuntime: RuntimeName;
-    sandboxTimeoutMs: number;
-  }> {
-    const values = await settings.get();
-    const token = values.vercelToken?.trim() ?? "";
-    const teamId = values.teamId.trim();
-    const projectId = values.projectId.trim();
-    const missing = [
-      token === "" ? "vercelToken" : null,
-      teamId === "" ? "teamId" : null,
-      projectId === "" ? "projectId" : null,
-    ].filter((value): value is string => value !== null);
+  // In-memory sign-in attempt. Deliberately not persisted: a device code is
+  // short-lived, and a reload should drop a half-finished flow rather than
+  // resume one the user has forgotten about.
+  let pending: {
+    authorization: DeviceAuthorization;
+    controller: AbortController;
+  } | null = null;
+  let lastAuthError: string | null = null;
+  /** De-duplicates concurrent refreshes so two runs cannot race. */
+  let refreshInFlight: Promise<StoredSession> | null = null;
 
-    const seconds = Number.parseInt(values.sandboxTimeoutSeconds, 10);
+  async function readClientId(): Promise<string> {
+    const { oauthClientId } = await settings.get();
+    const trimmed = oauthClientId.trim();
+    return trimmed === "" ? DEFAULT_CLIENT_ID : trimmed;
+  }
+
+  async function readStoredSession(): Promise<StoredSession | null> {
+    const { vercelSession } = await settings.get();
+    if (vercelSession === undefined || vercelSession.trim() === "") return null;
+    const parsed = storedSessionSchema.safeParse(
+      JSON.parse(vercelSession) as unknown,
+    );
+    return parsed.success ? parsed.data : null;
+  }
+
+  /**
+   * Persist through the settings route, because a settings handle is
+   * read-only by design. Writing the plugin's own id is the sanctioned way
+   * for a plugin to update a value the user did not type.
+   */
+  async function writeStoredSession(session: StoredSession | null) {
+    await bb.sdk.plugins.updateSettings({
+      pluginId: bb.pluginId,
+      values: { vercelSession: session === null ? "" : JSON.stringify(session) },
+    });
+  }
+
+  async function describeAuth(): Promise<z.infer<typeof authStatusSchema>> {
+    const stored = await readStoredSession();
+    if (stored !== null) {
+      return {
+        state: "signed-in",
+        verificationUriComplete: null,
+        userCode: null,
+        teamSlug: stored.teamSlug,
+        projectSlug: stored.projectSlug,
+        error: null,
+      };
+    }
+    if (pending !== null) {
+      return {
+        state: "pending",
+        verificationUriComplete: pending.authorization.verificationUriComplete,
+        userCode: pending.authorization.userCode,
+        teamSlug: null,
+        projectSlug: null,
+        error: lastAuthError,
+      };
+    }
     return {
-      credentials:
-        missing.length === 0 ? { token, teamId, projectId } : undefined,
-      missing,
-      // The descriptor's options are exactly the runtime names.
-      defaultRuntime: values.defaultRuntime as RuntimeName,
-      sandboxTimeoutMs:
-        Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 300_000,
+      state: "signed-out",
+      verificationUriComplete: null,
+      userCode: null,
+      teamSlug: null,
+      projectSlug: null,
+      error: lastAuthError,
     };
   }
 
-  const initial = await resolveConfig();
-  if (initial.missing.length > 0) {
-    bb.status.needsConfiguration(
-      `Set ${initial.missing.join(", ")} with \`bb plugin config cloud-sandbox set <key> <value>\`, then reload. Create a token at https://vercel.com/account/tokens.`,
-    );
+  /**
+   * Turn a fresh OAuth session into a stored one by resolving the Vercel team
+   * and project, creating a default project when the user has none.
+   *
+   * `cwd` is pinned to a temp directory on purpose: inferScope otherwise reads
+   * `.vercel/project.json` relative to `process.cwd()`, which is wherever the
+   * bb server happened to be launched — it must not silently adopt an
+   * unrelated linked project.
+   */
+  async function resolveScope(session: AuthSession): Promise<StoredSession> {
+    const scope = await inferScope({
+      token: session.accessToken,
+      cwd: tmpdir(),
+    });
+    if (scope.created) {
+      bb.log.info(
+        `created Vercel project ${scope.projectId} in team ${scope.teamId}`,
+      );
+    }
+    return {
+      accessToken: session.accessToken,
+      refreshToken: session.refreshToken,
+      expiresAt: session.expiresAt,
+      teamId: scope.teamId,
+      projectId: scope.projectId,
+      teamSlug: scope.teamSlug ?? null,
+      projectSlug: scope.projectSlug ?? null,
+    };
+  }
+
+  /** Return a session whose access token is good for at least REFRESH_SKEW_MS. */
+  async function ensureFreshSession(): Promise<StoredSession | null> {
+    const stored = await readStoredSession();
+    if (stored === null) return null;
+    if (stored.expiresAt - REFRESH_SKEW_MS > Date.now()) return stored;
+    if (stored.refreshToken === null) return stored;
+
+    refreshInFlight ??= (async () => {
+      const clientId = await readClientId();
+      const refreshed = await refreshSession(stored.refreshToken!, clientId);
+      const next: StoredSession = { ...stored, ...refreshed };
+      await writeStoredSession(next);
+      return next;
+    })().finally(() => {
+      refreshInFlight = null;
+    });
+    return refreshInFlight;
   }
 
   async function readRuns(): Promise<RunRecord[]> {
@@ -158,45 +256,113 @@ export default async function plugin(bb: BbPluginApi) {
     return run;
   }
 
-  /**
-   * Shared execution path. Throws a message naming the missing settings when
-   * the plugin is not configured, so every surface reports it the same way.
-   */
-  async function execute(params: {
-    kind: RunRecord["kind"];
-    runtime: RuntimeName | null;
-    input: string;
-    code?: string;
-    cmd?: string;
-    args?: string[];
-  }): Promise<RunRecord> {
+  async function resolveConfig(): Promise<{
+    credentials: SandboxCredentials | undefined;
+    defaultRuntime: RuntimeName;
+    sandboxTimeoutMs: number;
+  }> {
+    const values = await settings.get();
+    const session = await ensureFreshSession();
+    const seconds = Number.parseInt(values.sandboxTimeoutSeconds, 10);
+    return {
+      credentials:
+        session === null
+          ? undefined
+          : {
+              token: session.accessToken,
+              teamId: session.teamId,
+              projectId: session.projectId,
+            },
+      defaultRuntime: values.defaultRuntime as RuntimeName,
+      sandboxTimeoutMs:
+        Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 300_000,
+    };
+  }
+
+  if ((await readStoredSession()) === null) {
+    bb.status.needsConfiguration(
+      "Not signed in to Vercel. Use Sign in with Vercel on this plugin's settings page.",
+    );
+  }
+
+  /** Drive a sign-in to completion in the background. */
+  function beginSignIn(authorization: DeviceAuthorization, clientId: string) {
+    const controller = new AbortController();
+    pending = { authorization, controller };
+    lastAuthError = null;
+
+    void (async () => {
+      try {
+        const session = await pollForSession(
+          authorization,
+          clientId,
+          controller.signal,
+        );
+        const stored = await resolveScope(session);
+        pending = null;
+        // Written last: persisting while the plugin is in needs-configuration
+        // makes bb retry the load, which replaces this generation and makes
+        // the captured `bb` handle stale.
+        await writeStoredSession(stored);
+      } catch (error) {
+        pending = null;
+        lastAuthError = error instanceof Error ? error.message : String(error);
+        bb.log.warn(`sign-in failed: ${lastAuthError}`);
+      }
+      try {
+        bb.realtime.publish(AUTH_CHANGED, {});
+      } catch {
+        // The generation was replaced by the settings write above; the next
+        // load reports the new state anyway.
+      }
+    })();
+  }
+
+  async function startSignIn() {
+    if (pending !== null) return describeAuth();
+    if ((await readStoredSession()) !== null) return describeAuth();
+    const clientId = await readClientId();
+    const authorization = await startDeviceAuthorization(clientId);
+    beginSignIn(authorization, clientId);
+    return describeAuth();
+  }
+
+  async function signOut() {
+    pending?.controller.abort();
+    pending = null;
+    lastAuthError = null;
+    const stored = await readStoredSession();
+    if (stored !== null) {
+      // Best effort: a failed revocation must not strand the local session.
+      await revokeToken(stored.accessToken, await readClientId()).catch(
+        () => undefined,
+      );
+      await writeStoredSession(null);
+    }
+    return describeAuth();
+  }
+
+  async function execute(
+    code: string,
+    runtime: RuntimeName,
+  ): Promise<RunRecord> {
     const config = await resolveConfig();
     if (config.credentials === undefined) {
       throw new Error(
-        `Cloud Sandbox is not configured: set ${config.missing.join(", ")} with \`bb plugin config cloud-sandbox set <key> <value>\`.`,
+        "Not signed in to Vercel. Use Sign in with Vercel on this plugin's settings page.",
       );
     }
-    const options = {
+    const result = await runCode(code, runtime, {
       credentials: config.credentials,
       sandboxTimeoutMs: config.sandboxTimeoutMs,
       commandTimeoutMs: config.sandboxTimeoutMs,
-    };
-
-    const result =
-      params.code === undefined
-        ? await runInSandbox({
-            ...options,
-            cmd: params.cmd ?? "",
-            args: params.args ?? [],
-          })
-        : await runCode(params.code, params.runtime ?? "node", options);
+    });
 
     return recordRun({
       id: randomUUID().slice(0, 8),
       startedAt: new Date().toISOString(),
-      kind: params.kind,
-      runtime: params.runtime,
-      input: truncate(params.input),
+      runtime,
+      input: truncate(code),
       sandboxName: result.sandboxName,
       exitCode: result.exitCode,
       stdout: truncate(result.stdout),
@@ -207,14 +373,14 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(rpcContract, {
-    status: async () => {
-      const config = await resolveConfig();
-      return {
-        configured: config.credentials !== undefined,
-        missing: config.missing,
-        defaultRuntime: config.defaultRuntime,
-      };
+    auth_status: () => describeAuth(),
+    auth_start: () => startSignIn(),
+    auth_cancel: async () => {
+      pending?.controller.abort();
+      pending = null;
+      return describeAuth();
     },
+    auth_sign_out: () => signOut(),
     runs_list: async () => ({ runs: await readRuns() }),
     runs_clear: async () => {
       const cleared = (await readRuns()).length;
@@ -222,159 +388,11 @@ export default async function plugin(bb: BbPluginApi) {
       bb.realtime.publish(RUNS_CHANGED, { count: 0 });
       return { cleared };
     },
-    run_code: ({ code, runtime }) =>
-      execute({ kind: "code", runtime, input: code, code }),
-  });
-
-  // The `bb cloud-sandbox` command. `run` executes on the SERVER, so this
-  // command deliberately takes code and arguments inline rather than reading
-  // a path — a path would name a file on the invoking machine, which may not
-  // be the server's.
-  const usage = [
-    "Usage:",
-    "  bb cloud-sandbox status [--json]",
-    "  bb cloud-sandbox run [--runtime node|python] <code> [--json]",
-    "  bb cloud-sandbox exec <cmd> [args...] [--json]",
-    "  bb cloud-sandbox history [--json]",
-    "",
-    "Examples:",
-    '  bb cloud-sandbox run \'console.log(1 + 1)\'',
-    "  bb cloud-sandbox run --runtime python 'print(sum(range(10)))'",
-    "  bb cloud-sandbox exec bash -lc 'uname -a && node --version'",
-  ].join("\n");
-
-  function formatRun(run: RunRecord): string {
-    const lines = [
-      `${run.id}  exit ${run.exitCode}  sandbox ${run.sandboxName}  (boot ${run.createdInMs}ms, run ${run.ranInMs}ms)`,
-    ];
-    if (run.stdout.trim() !== "") lines.push("--- stdout ---", run.stdout.trimEnd());
-    if (run.stderr.trim() !== "") lines.push("--- stderr ---", run.stderr.trimEnd());
-    return lines.join("\n");
-  }
-
-  bb.cli.register({
-    name: "cloud-sandbox",
-    summary: "Run code and commands in an isolated Vercel Sandbox",
-    commands: [
-      {
-        name: "status",
-        summary: "Show whether Vercel credentials are configured",
-        usage: "bb cloud-sandbox status [--json]",
-      },
-      {
-        name: "run",
-        summary: "Run a code snippet in a fresh sandbox and capture its output",
-        usage:
-          "bb cloud-sandbox run [--runtime node|python] <code> [--json]",
-      },
-      {
-        name: "exec",
-        summary: "Run a shell command in a fresh sandbox and capture its output",
-        usage: "bb cloud-sandbox exec <cmd> [args...] [--json]",
-      },
-      {
-        name: "history",
-        summary: "List recent sandbox runs",
-        usage: "bb cloud-sandbox history [--json]",
-      },
-    ],
-    async run(argv) {
-      const json = argv.includes("--json");
-      const rest = argv.filter((arg) => arg !== "--json");
-      const [command, ...args] = rest;
-      const reply = (value: unknown, text: string) => ({
-        exitCode: 0,
-        stdout: json ? JSON.stringify(value) : text,
-      });
-
-      try {
-        switch (command) {
-          case undefined:
-          case "help":
-          case "--help":
-            return { exitCode: 0, stdout: usage };
-
-          case "status": {
-            const config = await resolveConfig();
-            const configured = config.credentials !== undefined;
-            return reply(
-              {
-                configured,
-                missing: config.missing,
-                defaultRuntime: config.defaultRuntime,
-                sandboxTimeoutMs: config.sandboxTimeoutMs,
-              },
-              configured
-                ? `Configured. Default runtime: ${config.defaultRuntime}, sandbox timeout ${config.sandboxTimeoutMs / 1000}s.`
-                : `Not configured. Missing: ${config.missing.join(", ")}.\nSet each with \`bb plugin config cloud-sandbox set <key> <value>\`.`,
-            );
-          }
-
-          case "run": {
-            let runtime: RuntimeName = (await resolveConfig()).defaultRuntime;
-            const positional = [...args];
-            const flagIndex = positional.indexOf("--runtime");
-            if (flagIndex !== -1) {
-              const value = positional[flagIndex + 1];
-              if (value !== "node" && value !== "python") {
-                return {
-                  exitCode: 1,
-                  stderr: `--runtime must be one of ${Object.keys(RUNTIMES).join(", ")}.`,
-                };
-              }
-              runtime = value;
-              positional.splice(flagIndex, 2);
-            }
-            const code = positional.join(" ").trim();
-            if (code === "") break;
-            const run = await execute({
-              kind: "code",
-              runtime,
-              input: code,
-              code,
-            });
-            return reply(run, formatRun(run));
-          }
-
-          case "exec": {
-            const [cmd, ...cmdArgs] = args;
-            if (cmd === undefined) break;
-            const run = await execute({
-              kind: "exec",
-              runtime: null,
-              input: [cmd, ...cmdArgs].join(" "),
-              cmd,
-              args: cmdArgs,
-            });
-            return reply(run, formatRun(run));
-          }
-
-          case "history": {
-            const runs = await readRuns();
-            return reply(
-              runs,
-              runs.length === 0
-                ? "No runs yet."
-                : runs
-                    .map(
-                      (run) =>
-                        `${run.id}  ${run.startedAt}  exit ${run.exitCode}  ${run.kind}  ${run.input.split("\n")[0].slice(0, 60)}`,
-                    )
-                    .join("\n"),
-            );
-          }
-        }
-      } catch (error) {
-        return {
-          exitCode: 1,
-          stderr: error instanceof Error ? error.message : String(error),
-        };
-      }
-      return { exitCode: 1, stderr: usage };
-    },
+    run_code: ({ code, runtime }) => execute(code, runtime),
   });
 
   bb.onDispose(() => {
+    pending?.controller.abort();
     bb.log.info("disposed");
   });
 }

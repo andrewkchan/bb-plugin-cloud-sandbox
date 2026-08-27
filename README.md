@@ -1,65 +1,50 @@
 # bb-plugin-cloud-sandbox
 
-A bb plugin that runs code and commands inside an isolated
-[Vercel Sandbox](https://vercel.com/docs/vercel-sandbox) microVM and captures
-the output.
+A bb plugin that runs code inside an isolated
+[Vercel Sandbox](https://vercel.com/docs/vercel-sandbox) microVM and shows the
+captured output. The interface is entirely graphical.
 
-One core (`sandbox.ts`) serves three surfaces:
-
-- **Cloud Sandbox page** (`app.tsx`) — paste a Node or Python snippet, run it,
-  read stdout/stderr/exit code, browse recent runs.
-- **`bb cloud-sandbox` CLI** (`server.ts`) — what agents use.
-- **Skill** (`skills/cloud-sandbox/SKILL.md`) — tells agents when and how.
+- **Cloud Sandbox page** — paste a Node or Python snippet, run it, read
+  stdout/stderr/exit code, browse recent runs.
+- **Settings → Vercel account** — one **Sign in with Vercel** button.
 
 ## Setup
 
-### 1. Vercel credentials
-
 ```sh
-npm i -g vercel
-vercel login
-cd ~/bb-plugin-cloud-sandbox
-vercel link      # pick or create the Vercel project sandboxes bill to
-vercel env pull  # writes .env.local, including VERCEL_OIDC_TOKEN
+bb plugin install .
 ```
 
-`vercel env pull` is enough for the standalone verification script below.
-`VERCEL_OIDC_TOKEN` is short-lived, though, so the **plugin** authenticates
-with a personal access token instead — create one at
-<https://vercel.com/account/tokens>.
+Then open the plugin's settings page and click **Sign in with Vercel**. That
+is the whole setup: approve the device code in the browser tab that opens, and
+the plugin resolves your Vercel team and creates a sandbox project if you do
+not already have one.
 
-### 2. Verify the sandbox works, without bb
+There is no CLI to install, no access token to copy, and no team or project id
+to look up. The session refreshes itself, so the sign-in is one-time.
+
+## Configuration
+
+Everything is optional and lives in the plugin's settings page.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `oauthClientId` | Vercel SDK's client | Set this to your own registered Vercel OAuth client for a branded consent screen |
+| `defaultRuntime` | `node` | Runtime preselected on the page |
+| `sandboxTimeoutSeconds` | `300` | Sandbox and command timeout |
+| `vercelSession` | — | Managed by the sign-in flow; do not edit by hand |
+
+## Verifying the sandbox without bb
+
+`scripts/verify-sandbox.ts` boots a real sandbox, runs a Node snippet, prints
+the captured output, and exits non-zero if anything came back wrong. It is
+independent of the plugin and authenticates from the environment:
 
 ```sh
+vercel link && vercel env pull   # writes .env.local with VERCEL_OIDC_TOKEN
 npm run verify:sandbox
 ```
 
-Boots a real sandbox, runs a Node snippet in it, prints the captured output,
-and exits non-zero if anything came back wrong. It reads `.env.local`, or
-`VERCEL_TOKEN` + `VERCEL_TEAM_ID` + `VERCEL_PROJECT_ID` from the environment.
-
-### 3. Install and configure the plugin
-
-```sh
-bb plugin install .
-bb plugin config cloud-sandbox set vercelToken <token>
-bb plugin config cloud-sandbox set teamId <team-id>
-bb plugin config cloud-sandbox set projectId <project-id>
-bb plugin reload cloud-sandbox
-bb cloud-sandbox status
-```
-
-`teamId` and `projectId` are the `orgId` and `projectId` in the
-`.vercel/project.json` that `vercel link` wrote.
-
-## Usage
-
-```sh
-bb cloud-sandbox run 'console.log(1 + 1)'
-bb cloud-sandbox run --runtime python 'print(sum(range(10)))'
-bb cloud-sandbox exec bash -lc 'uname -a && node --version'
-bb cloud-sandbox history --json
-```
+It also accepts `VERCEL_TOKEN` + `VERCEL_TEAM_ID` + `VERCEL_PROJECT_ID`.
 
 ## Development
 
@@ -70,12 +55,30 @@ npm run build
 bb plugin logs cloud-sandbox -f
 ```
 
+## Layout
+
+| File | Role |
+| --- | --- |
+| `sandbox.ts` | Boots a sandbox, stages files, runs a command, captures output. No bb dependency. |
+| `auth.ts` | Vercel OAuth device authorization (RFC 8628). No bb dependency. |
+| `server.ts` | Settings, RPC, sign-in orchestration, run history. |
+| `app.tsx` | The Cloud Sandbox page and the Vercel account settings section. |
+| `scripts/verify-sandbox.ts` | Standalone end-to-end check. |
+
 ## Notes
 
 - Every run boots a fresh sandbox and stops it in a `finally` — a leaked
   sandbox keeps billing until its own timeout fires.
-- `bb.cli` `run` executes on the bb **server**, so `bb cloud-sandbox` takes
-  code inline rather than a file path, which would name a file on the
-  invoking machine instead.
+- `auth.ts` implements the device grant directly rather than calling
+  `@vercel/sandbox`'s `OAuth()`, whose client id is a module constant with no
+  parameter or env override. Doing it directly keeps `oauthClientId`
+  swappable.
+- The access token and refresh token live in a single `secret` setting, so
+  they are stored in the plugin's 0600 secrets directory rather than in
+  `bb.db`. They are written through `bb.sdk.plugins.updateSettings`, because a
+  settings handle is read-only by design.
+- `inferScope` is called with `cwd` pinned to a temp directory. It otherwise
+  reads `.vercel/project.json` relative to `process.cwd()` — wherever the bb
+  server was launched — and could silently adopt an unrelated linked project.
 - Run history is capped at 25 entries with per-stream output truncated, to
   stay under the 256KB `bb.storage.kv` value cap.
