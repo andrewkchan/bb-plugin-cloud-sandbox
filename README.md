@@ -8,7 +8,8 @@ can run threads. The interface is entirely graphical.
 - **Cloud Machines page** — a table of machines with status, created and
   last-used times, sortable by name or either date and filterable by status.
   Each row has a menu to wake, stop or delete it; plus create, manual refresh,
-  a link to the project's sandboxes on vercel.com, and a collapsible debug log.
+  links to bb's own machine settings and to the project's sandboxes on
+  vercel.com, and a collapsible debug log.
 - **Settings → Vercel account** — one **Sign in with Vercel** button.
 
 ## Setup
@@ -166,6 +167,13 @@ building native modules, so a new machine sits at `Connecting` for a while.
 - A row is titled by its **sandbox name**, with the bb host id as a subtitle.
   The sandbox name is the one identifier this plugin owns; bb's host *name*
   is the container's hostname, which a resumed sandbox may not keep.
+- "Running for X" is measured from the machine's **current session**, not from
+  when the sandbox was created. Waking boots a new VM from the filesystem
+  snapshot, so creation time would count the hours a machine spent stopped.
+  The session start comes from `listSessions()`, matched against the
+  `currentSessionId` the sandbox list reports; that costs one request per
+  *running* machine, so stopped machines — which have no uptime to show — are
+  not queried.
 - "Last used" is bb's `lastSeenAt` for the machine's host — when bb last heard
   from the daemon — falling back to Vercel's sandbox `updatedAt` for a machine
   that never connected. A machine with no last-used time sorts last in either

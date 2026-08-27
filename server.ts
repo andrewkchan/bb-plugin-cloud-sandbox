@@ -20,6 +20,7 @@ import {
 import {
   createMachine,
   destroyMachine,
+  fetchSessionStarts,
   listMachines,
   stopMachine,
   wakeMachine,
@@ -105,6 +106,11 @@ const machineViewSchema = z.object({
   uptimeMs: z.number().nullable(),
   createdAt: z.number(),
   /**
+   * When the VM currently backing this machine started. Null when it is not
+   * running. Distinct from createdAt, which is when the sandbox first existed.
+   */
+  sessionStartedAt: z.number().nullable(),
+  /**
    * When bb last heard from the machine, falling back to when Vercel last
    * changed the sandbox's state for a machine that never connected.
    */
@@ -154,10 +160,10 @@ export const rpcContract = defineRpcContract({
   events_clear: { input: z.null(), output: z.object({ cleared: z.number() }) },
 });
 
-/** "12h 34m", "7m", "just now". */
+/** "12h 34m", "7m", "<1m" — always reads correctly after "Running for". */
 function formatUptime(ms: number): string {
   const minutes = Math.floor(ms / 60_000);
-  if (minutes < 1) return "just now";
+  if (minutes < 1) return "<1m";
   const hours = Math.floor(minutes / 60);
   const remaining = minutes % 60;
   if (hours === 0) return `${remaining}m`;
@@ -476,11 +482,24 @@ export default async function plugin(bb: BbPluginApi) {
     );
     const recordByName = new Map(records.map((r) => [r.name, r]));
     const hostById = new Map(hosts.map((h) => [h.id, h]));
+    // Only machines that are up have a session worth asking about, which also
+    // keeps this to one extra request per running machine rather than per row.
+    const sessionStarts = await fetchSessionStarts(
+      credentials,
+      sandboxes.filter(
+        (sandbox) => sandbox.status === "running" || sandbox.status === "pending",
+      ),
+    );
 
     const views: MachineView[] = sandboxes.map((sandbox) => {
       const record = recordByName.get(sandbox.name) ?? null;
       const host = record === null ? null : (hostById.get(record.hostId) ?? null);
-      const uptimeMs = Date.now() - sandbox.createdAt;
+      const sessionStartedAt = sessionStarts.get(sandbox.name) ?? null;
+      // Uptime is measured from the current session, not from when the sandbox
+      // first existed: waking boots a new VM, so createdAt would count the time
+      // the machine spent stopped.
+      const uptimeMs =
+        sessionStartedAt === null ? null : Date.now() - sessionStartedAt;
       // bb's view of when the machine was last alive is more meaningful than
       // Vercel's, but only exists once the daemon has connected at least once.
       const lastUsedAt = host?.lastSeenAt ?? sandbox.updatedAt;
@@ -494,6 +513,7 @@ export default async function plugin(bb: BbPluginApi) {
           status: `Error (${sandbox.status})`,
           uptimeMs: null,
           createdAt: sandbox.createdAt,
+          sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
           error: `Sandbox ${sandbox.status}`,
@@ -508,6 +528,7 @@ export default async function plugin(bb: BbPluginApi) {
           status: "Inactive",
           uptimeMs: null,
           createdAt: sandbox.createdAt,
+          sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
           error: null,
@@ -521,9 +542,13 @@ export default async function plugin(bb: BbPluginApi) {
           hostId: record?.hostId ?? null,
           hostName: host.name,
           state: "running" as const,
-          status: `Running for ${formatUptime(uptimeMs)}`,
+          status:
+            uptimeMs === null
+              ? "Running"
+              : `Running for ${formatUptime(uptimeMs)}`,
           uptimeMs,
           createdAt: sandbox.createdAt,
+          sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
           error: null,
@@ -537,6 +562,7 @@ export default async function plugin(bb: BbPluginApi) {
         status: "Connecting",
         uptimeMs: null,
         createdAt: sandbox.createdAt,
+        sessionStartedAt,
         lastUsedAt,
         waking: waking.has(sandbox.name),
         error: null,

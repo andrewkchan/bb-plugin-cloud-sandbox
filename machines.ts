@@ -40,6 +40,8 @@ export interface MachineSandbox {
   createdAt: number;
   /** Epoch ms the sandbox last changed state, per Vercel. */
   updatedAt: number;
+  /** The session (VM) currently backing this sandbox, if any. */
+  currentSessionId: string | null;
   /** Configured lifetime in ms, if the API reported one. */
   timeoutMs: number | null;
 }
@@ -159,6 +161,7 @@ export async function listMachines(
       status: entry.status,
       createdAt: entry.createdAt,
       updatedAt: entry.updatedAt,
+      currentSessionId: entry.currentSessionId ?? null,
       timeoutMs: entry.timeout ?? null,
     }))
     .sort((a, b) => b.createdAt - a.createdAt);
@@ -288,6 +291,45 @@ export async function wakeMachine(
     );
   }
   return lastMeaningfulLine(stdout);
+}
+
+/**
+ * When each machine's *current* session started.
+ *
+ * Sandbox `createdAt` is the wrong clock for uptime: resuming boots a new
+ * session from the filesystem snapshot, so a machine that has been stopped and
+ * woken has a creation time far older than the VM actually running. The
+ * session list carries the real start.
+ *
+ * This costs one request per machine, so callers should pass only the machines
+ * that are actually up — a stopped machine has no uptime to show.
+ */
+export async function fetchSessionStarts(
+  credentials: SandboxCredentials,
+  machines: { name: string; currentSessionId: string | null }[],
+): Promise<Map<string, number>> {
+  const entries = await Promise.all(
+    machines.map(async (machine) => {
+      try {
+        const sandbox = await Sandbox.get({ ...credentials, name: machine.name });
+        const sessions = await sandbox
+          .listSessions({ limit: 5, sortOrder: "desc" })
+          .then((paginator) => paginator.toArray());
+        const current =
+          sessions.find((session) => session.id === machine.currentSessionId) ??
+          sessions[0];
+        if (current === undefined) return null;
+        // startedAt is when the VM actually came up; createdAt is when the
+        // session was requested, which is close enough when it is missing.
+        const started = current.startedAt ?? current.createdAt;
+        return [machine.name, started] as const;
+      } catch {
+        // A machine whose sessions cannot be read simply has no uptime shown.
+        return null;
+      }
+    }),
+  );
+  return new Map(entries.filter((entry) => entry !== null));
 }
 
 /** Stop one machine's sandbox. Safe to call on an already-stopped sandbox. */

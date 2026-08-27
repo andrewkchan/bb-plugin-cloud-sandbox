@@ -109,11 +109,12 @@ function formatDate(ms: number | null): string {
   });
 }
 
-function DateCell({ ms }: { ms: number | null }) {
+function DateCell({ ms, hint }: { ms: number | null; hint?: string }) {
+  const iso = ms === null ? undefined : new Date(ms).toISOString();
   return (
     <span
       className="text-xs text-muted-foreground"
-      title={ms === null ? undefined : new Date(ms).toISOString()}
+      title={[iso, hint].filter(Boolean).join("\n") || undefined}
     >
       {formatDate(ms)}
     </span>
@@ -455,10 +456,17 @@ function MachinesPage() {
             )}
             {creating ? "Creating…" : "Create cloud machine"}
           </Button>
+          {/* Internal bb route: UrlLink keeps it in SPA history. */}
+          <UrlLink
+            href="/settings/machines"
+            className="ml-auto text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+          >
+            View BB connect machines
+          </UrlLink>
           {vercelUrl === null ? null : (
             <UrlLink
               href={vercelUrl}
-              className="ml-auto text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+              className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
             >
               View on Vercel
             </UrlLink>
@@ -466,7 +474,7 @@ function MachinesPage() {
           <Button
             variant="outline"
             size="sm"
-            className={vercelUrl === null ? "ml-auto" : undefined}
+
             onClick={() => refetch(true)}
             disabled={refreshing}
           >
@@ -581,7 +589,14 @@ function MachinesPage() {
                           <StatusCell machine={machine} />
                         </TableCell>
                         <TableCell>
-                          <DateCell ms={machine.createdAt} />
+                          <DateCell
+                            ms={machine.createdAt}
+                            hint={
+                              machine.sessionStartedAt === null
+                                ? undefined
+                                : `Current session started ${new Date(machine.sessionStartedAt).toISOString()}`
+                            }
+                          />
                         </TableCell>
                         <TableCell>
                           <DateCell ms={machine.lastUsedAt} />
