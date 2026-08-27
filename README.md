@@ -114,14 +114,23 @@ building native modules, so a new machine sits at `Connecting` for a while.
   invalidate them. A `disconnected` host is the correct state for a machine
   that is off but could come back — the same state bb shows for a sleeping
   laptop. Only an explicit **Remove** deletes the host and the record.
-- **Waking** resumes a stopped machine. Vercel restores the microVM from its
-  snapshot, and because that snapshot carries memory as well as disk, the host
-  daemon usually comes back on its own — with the same bb host id, since the
-  durable credentials in `~/.bb-machines` survive. The wake script relaunches
-  the daemon only if the restore did not bring it back, so a cold disk-only
-  restore still reconnects. It discovers the data directory on disk rather
+- **Waking** resumes a stopped machine. Vercel
+  [persists sandboxes by default](https://vercel.com/docs/sandbox/concepts/persistent-sandboxes):
+  stopping snapshots the filesystem and resuming boots **a new session** from
+  that snapshot, with a **fresh session timeout**. So the durable `hostId` and
+  `hostKey` in `~/.bb-machines` survive and the machine returns under the same
+  bb host id — but **only the filesystem is restored, not running processes**.
+  The docs are explicit about this: `onResume` exists "to restart background
+  services". Waking therefore has to relaunch the host daemon itself, which is
+  what the wake script does. It discovers the data directory on disk rather
   than deriving it from a server URL, because bb connect can mint a different
   tunnel URL than the machine originally enrolled against.
+- The wake script checks liveness against the daemon's own
+  `http://127.0.0.1:<port>/status` endpoint — the same signal bb's installer
+  waits on — and returns only once it reports `connected`. Do **not** check
+  with `pgrep -f "bb-app host-daemon"`: that pattern also matches the shell
+  running the script, because it appears in that shell's own command line, so
+  it always reports a running daemon and the relaunch never happens.
 - Row actions live in one menu and stay visible when they do not apply, so the
   menu reads the same for every row. Wake is enabled only for `Inactive`
   (a `failed`/`aborted` sandbox has no session to resume) and Stop only for

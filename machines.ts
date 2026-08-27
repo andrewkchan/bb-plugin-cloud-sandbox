@@ -230,16 +230,28 @@ export async function destroyMachine(
  * different tunnel URL than the one the machine originally enrolled against.
  */
 export function buildWakeScript(): string {
+  // Liveness is checked against the daemon's own /status endpoint, the same
+  // signal bb's installer waits on. Matching on a process name would be wrong
+  // here: `pgrep -f "bb-app host-daemon"` also matches the shell running this
+  // script, because the pattern appears in its own command line, so it always
+  // reports a running daemon and the relaunch below never happens.
+  const isConnected = `curl -sf --max-time 2 "http://127.0.0.1:$PORT/status" 2>/dev/null | grep -q '"connected"[[:space:]]*:[[:space:]]*true'`;
   return [
     "set -e",
     'DATA=$(find "$HOME/.bb-machines" -maxdepth 1 -mindepth 1 -type d ! -name host-daemon-ports | head -1)',
     '[ -n "$DATA" ] || { echo "no bb enrollment found in this sandbox"; exit 1; }',
-    'if pgrep -f "bb-app host-daemon" >/dev/null 2>&1; then echo "daemon already running"; exit 0; fi',
-    "SERVER=$(node -e \"console.log(require('$DATA/config.json').serverUrl)\")",
     'PORT=$(cat "$DATA/host-daemon-port" 2>/dev/null || echo 38888)',
+    `SERVER=$(node -e 'console.log(require(process.argv[1]).serverUrl)' "$DATA/config.json")`,
+    `if ${isConnected}; then echo "daemon already connected"; exit 0; fi`,
     'BB_APP_NPM_PREFIX="$DATA/npm" BB_DATA_DIR="$DATA" nohup "$DATA/npm/bin/bb-app" host-daemon --auto-update --host-daemon-port "$PORT" --server-url "$SERVER" >> "$DATA/wake.log" 2>&1 &',
-    "sleep 3",
-    'pgrep -f "bb-app host-daemon" >/dev/null 2>&1 && echo "daemon relaunched" || { echo "daemon did not start; see $DATA/wake.log"; exit 1; }',
+    // Return only once the machine is genuinely usable again, not merely
+    // once a process has been spawned.
+    "i=0",
+    "while [ $i -lt 60 ]; do",
+    `  if ${isConnected}; then echo "daemon reconnected"; exit 0; fi`,
+    "  i=$((i+1)); sleep 2",
+    "done",
+    'echo "daemon did not reconnect; see $DATA/wake.log"; exit 1',
   ].join("\n");
 }
 
