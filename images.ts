@@ -7,6 +7,7 @@
 //
 // Like machines.ts and auth.ts this module carries no bb dependency.
 import { Sandbox } from "@vercel/sandbox";
+import { z } from "zod";
 import type { SandboxCredentials } from "./machines.js";
 
 /** The registry every image is pushed to. */
@@ -201,4 +202,176 @@ export async function buildImage(
     await sandbox.stop().catch(() => undefined);
     await sandbox.delete().catch(() => undefined);
   }
+}
+
+
+// --------------------------------------------------------------- registry
+
+const VERCEL_API = "https://api.vercel.com";
+
+const projectSchema = z.object({ id: z.string() });
+const registryImagesSchema = z.object({
+  images: z.array(
+    z.object({
+      id: z.string(),
+      tags: z.array(z.string()).nullish(),
+      sizeInBytes: z.number().nullish(),
+    }),
+  ),
+});
+
+/** One manifest in the registry repository. */
+export interface RegistryImage {
+  id: string;
+  tags: string[];
+  sizeBytes: number;
+}
+
+/**
+ * Resolved `prj_…` ids, keyed by the slug they came from.
+ *
+ * The registry API rejects the project *slug* that `inferScope` returns and
+ * that the sandboxes API accepts, so every registry call needs this extra
+ * lookup. A project's id never changes, so caching it is safe.
+ */
+const projectIdCache = new Map<string, string>();
+
+async function api(
+  credentials: SandboxCredentials,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  return fetch(`${VERCEL_API}${path}`, {
+    ...init,
+    headers: {
+      ...init.headers,
+      authorization: `Bearer ${credentials.token}`,
+    },
+  });
+}
+
+/** Turn the project slug the plugin stores into the id the registry needs. */
+export async function resolveProjectId(
+  credentials: SandboxCredentials,
+): Promise<string> {
+  if (credentials.projectId.startsWith("prj_")) return credentials.projectId;
+  const cached = projectIdCache.get(credentials.projectId);
+  if (cached !== undefined) return cached;
+
+  const response = await api(
+    credentials,
+    `/v9/projects/${encodeURIComponent(credentials.projectId)}?teamId=${encodeURIComponent(credentials.teamId)}`,
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Could not resolve Vercel project "${credentials.projectId}" (${response.status}).`,
+    );
+  }
+  const project = projectSchema.parse(await response.json());
+  projectIdCache.set(credentials.projectId, project.id);
+  return project.id;
+}
+
+/** Every manifest currently in the plugin's registry repository. */
+export async function listRegistryImages(
+  credentials: SandboxCredentials,
+): Promise<RegistryImage[]> {
+  const projectId = await resolveProjectId(credentials);
+  const response = await api(
+    credentials,
+    `/v1/vcr/repository/${DEFAULT_REPOSITORY}/images?teamId=${encodeURIComponent(credentials.teamId)}&projectId=${encodeURIComponent(projectId)}`,
+  );
+  // A repository that does not exist yet simply has no images.
+  if (response.status === 404) return [];
+  if (!response.ok) {
+    throw new Error(`Could not list registry images (${response.status}).`);
+  }
+  const parsed = registryImagesSchema.parse(await response.json());
+  return parsed.images.map((image) => ({
+    id: image.id,
+    tags: image.tags ?? [],
+    sizeBytes: image.sizeInBytes ?? 0,
+  }));
+}
+
+async function deleteRegistryImage(
+  credentials: SandboxCredentials,
+  imageId: string,
+): Promise<void> {
+  const projectId = await resolveProjectId(credentials);
+  const response = await api(
+    credentials,
+    `/v1/vcr/repository/${DEFAULT_REPOSITORY}/images/${encodeURIComponent(imageId)}?teamId=${encodeURIComponent(credentials.teamId)}&projectId=${encodeURIComponent(projectId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`Could not delete image ${imageId} (${response.status}).`);
+  }
+}
+
+export interface RegistryCleanupResult {
+  deleted: string[];
+  freedBytes: number;
+  failures: string[];
+}
+
+/**
+ * Delete registry manifests, selected by a predicate.
+ *
+ * Every failure is collected rather than thrown: registry cleanup is
+ * housekeeping, and a manifest that will not delete must not fail the build or
+ * the deletion that triggered it.
+ */
+async function deleteWhere(
+  credentials: SandboxCredentials,
+  predicate: (image: RegistryImage) => boolean,
+): Promise<RegistryCleanupResult> {
+  const result: RegistryCleanupResult = {
+    deleted: [],
+    freedBytes: 0,
+    failures: [],
+  };
+  let images: RegistryImage[];
+  try {
+    images = await listRegistryImages(credentials);
+  } catch (error) {
+    result.failures.push(
+      error instanceof Error ? error.message : String(error),
+    );
+    return result;
+  }
+  for (const image of images.filter(predicate)) {
+    try {
+      await deleteRegistryImage(credentials, image.id);
+      result.deleted.push(image.id);
+      result.freedBytes += image.sizeBytes;
+    } catch (error) {
+      result.failures.push(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+  return result;
+}
+
+/**
+ * Drop manifests no tag points at.
+ *
+ * Pushing a tag that already exists leaves the manifest it replaced behind
+ * with no tags and its full size, so this runs after every successful build.
+ * The repository is plugin-managed and every image it publishes is tagged, so
+ * an untagged manifest is always a superseded one.
+ */
+export function pruneUntaggedImages(
+  credentials: SandboxCredentials,
+): Promise<RegistryCleanupResult> {
+  return deleteWhere(credentials, (image) => image.tags.length === 0);
+}
+
+/** Drop the manifest a tag points at, used when an image is deleted. */
+export function deleteImagesForTag(
+  credentials: SandboxCredentials,
+  tag: string,
+): Promise<RegistryCleanupResult> {
+  return deleteWhere(credentials, (image) => image.tags.includes(tag));
 }

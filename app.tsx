@@ -1006,6 +1006,14 @@ function ImageDetail({
 
       {error !== null ? <p className="text-destructive">{error}</p> : null}
 
+      {/* Why the last build failed. Without this the list just says "Error". */}
+      {image.status === "error" && image.lastError !== null ? (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+          <p className="font-medium text-destructive">Last build failed</p>
+          <p className="mt-1 text-muted-foreground">{image.lastError}</p>
+        </div>
+      ) : null}
+
       <div className="flex items-center gap-2">
         <Button size="sm" onClick={build} disabled={busy || image.status === "building"}>
           {image.status === "building" ? "Building…" : "Build"}

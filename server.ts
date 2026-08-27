@@ -31,7 +31,10 @@ import {
 import {
   buildImage,
   DEFAULT_REPOSITORY,
+  deleteImagesForTag,
+  pruneUntaggedImages,
   type ImageEnvVar,
+  type RegistryCleanupResult,
 } from "./images.js";
 
 /** Debug events kept for troubleshooting. Bounded to stay under the kv cap. */
@@ -83,6 +86,7 @@ const eventSchema = z.object({
     "machine.disconnected",
     "machine.stopped",
     "machine.deleted",
+    "image.registry-pruned",
     "machine.woken",
     "wake.requested",
     "wake.failed",
@@ -534,6 +538,46 @@ export default async function plugin(bb: BbPluginApi) {
       refreshInFlight = null;
     });
     return refreshInFlight;
+  }
+
+  /** Credentials when signed in, null otherwise. */
+  async function optionalCredentials(): Promise<SandboxCredentials | null> {
+    const session = await ensureFreshSession();
+    return session === null
+      ? null
+      : {
+          token: session.accessToken,
+          teamId: session.teamId,
+          projectId: session.projectId,
+        };
+  }
+
+  /**
+   * Registry housekeeping. Never throws: a manifest that will not delete is
+   * worth recording but must not fail the operation that triggered it.
+   */
+  async function recordCleanup(
+    label: string,
+    run: (credentials: SandboxCredentials) => Promise<RegistryCleanupResult>,
+  ): Promise<void> {
+    const credentials = await optionalCredentials();
+    if (credentials === null) return;
+    try {
+      const result = await run(credentials);
+      if (result.deleted.length === 0 && result.failures.length === 0) return;
+      await record(
+        "image.registry-pruned",
+        null,
+        `${label}: deleted ${result.deleted.length} manifest(s), freed ${(result.freedBytes / 1e6).toFixed(0)}MB` +
+          (result.failures.length === 0
+            ? ""
+            : `; ${result.failures.length} failed: ${result.failures.join("; ")}`),
+      );
+    } catch (error) {
+      bb.log.warn(
+        `${label} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async function requireCredentials(): Promise<SandboxCredentials> {
@@ -1145,6 +1189,9 @@ export default async function plugin(bb: BbPluginApi) {
         ).run(Date.now(), result.imageRef, buildId);
         setImageStatus(imageId, "ready", { imageRef: result.imageRef });
         bb.log.info(`image ${image.name} built as ${result.imageRef}`);
+        // Rebuilding a tag leaves the manifest it replaced untagged and full
+        // size, so only the latest hash for each image is kept.
+        await recordCleanup("prune after build", pruneUntaggedImages);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         db.prepare(
@@ -1240,12 +1287,16 @@ export default async function plugin(bb: BbPluginApi) {
       if (updated === null) throw new Error(`No image with id ${id}`);
       return updated;
     },
-    images_delete: ({ id }) => {
-      // The pushed image itself is left in the registry; deleting it needs a
-      // registry call this plugin does not make yet.
+    images_delete: async ({ id }) => {
       db.prepare("DELETE FROM builds WHERE image_id = ?").run(id);
       const result = db.prepare("DELETE FROM images WHERE id = ?").run(id);
       bb.realtime.publish(IMAGES_CHANGED, {});
+      // The tag is the image id, so this removes exactly this image's
+      // manifest; the prune then catches anything it superseded.
+      await recordCleanup("delete image from registry", (credentials) =>
+        deleteImagesForTag(credentials, id),
+      );
+      await recordCleanup("prune after delete", pruneUntaggedImages);
       return { deleted: result.changes > 0 };
     },
     images_build: async ({ id }) => ({ started: await startBuild(id) }),

@@ -104,9 +104,20 @@ the button will do, and nothing is created until the button is pressed. The
 selection follows the server's default until the user picks one, so a
 background refresh cannot silently change what the button would create.
 
-Deleting an image removes it and its build history from bb. The pushed tag
-stays in the container registry, which the image page's "Manage images on
-Vercel" link reaches. Until an image has been built the button is replaced by
+Deleting an image removes it and its build history from bb **and deletes its
+manifest from the container registry**. Only the latest hash of each image is
+kept: pushing a tag that already exists leaves the manifest it replaced behind,
+untagged and at full size, so every successful build prunes untagged manifests
+afterwards. One development rebuild had already stranded 470MB this way.
+
+Registry cleanup goes through `api.vercel.com/v1/vcr/...` rather than the
+`vercel vcr` CLI, so it needs no container tooling. Two things about that API
+are worth knowing: it rejects the project *slug* that `inferScope` returns and
+the sandboxes API accepts, so the plugin resolves the `prj_` id via
+`/v9/projects/<slug>` and caches it; and deletion addresses an image id, not a
+tag, so the repository is listed to find the manifest a tag points at. Every
+cleanup failure is recorded in the debug log rather than failing the build or
+deletion that triggered it. Until an image has been built the button is replaced by
 **Setup images**, which links to `#images` on this plugin's settings page —
 without one, a machine would install bb's prerequisites from scratch.
 
