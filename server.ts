@@ -1,10 +1,9 @@
-// bb-plugin-cloud-sandbox — run code in a Vercel Sandbox from bb.
+// bb-plugin-cloud-sandbox — cloud machines backed by Vercel Sandboxes.
 //
-// The interface is entirely graphical: a Cloud Sandbox page for running code
-// and a settings section for connecting a Vercel account. Authentication is
-// OAuth device authorization — the user clicks "Sign in with Vercel", approves
-// in the browser, and the plugin resolves (and if necessary creates) the Vercel
-// team and project itself. No CLI, no access token to copy, no ids to look up.
+// A "cloud machine" is a Vercel Sandbox that has enrolled itself as a bb
+// machine, so it shows up alongside local machines and can run threads. The
+// interface is entirely graphical: a Cloud Machines page and a settings
+// section for connecting a Vercel account over OAuth.
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
@@ -19,35 +18,19 @@ import {
   type DeviceAuthorization,
 } from "./auth.js";
 import {
-  runCode,
-  type RuntimeName,
-  type SandboxCredentials,
-} from "./sandbox.js";
+  createMachine,
+  listMachines,
+  stopMachine,
+  type EnrollmentDetails,
+} from "./machines.js";
+import type { SandboxCredentials } from "./sandbox.js";
 
-const MAX_OUTPUT_CHARS = 20_000;
-const MAX_HISTORY = 25;
-const RUNS_CHANGED = "runs-changed";
+/** Debug events kept for troubleshooting. Bounded to stay under the kv cap. */
+const MAX_EVENTS = 200;
+const MACHINES_CHANGED = "machines-changed";
 const AUTH_CHANGED = "auth-changed";
-/** Refresh this long before the access token actually expires. */
 const REFRESH_SKEW_MS = 60_000;
 
-const runtimeSchema = z.enum(["node", "python"]);
-
-const runRecordSchema = z.object({
-  id: z.string(),
-  startedAt: z.string(),
-  runtime: runtimeSchema.nullable(),
-  input: z.string(),
-  sandboxName: z.string(),
-  exitCode: z.number(),
-  stdout: z.string(),
-  stderr: z.string(),
-  createdInMs: z.number(),
-  ranInMs: z.number(),
-});
-export type RunRecord = z.infer<typeof runRecordSchema>;
-
-/** Everything the sign-in flow persists, stored as one secret setting. */
 const storedSessionSchema = z.object({
   accessToken: z.string(),
   refreshToken: z.string().nullable(),
@@ -61,79 +44,155 @@ type StoredSession = z.infer<typeof storedSessionSchema>;
 
 const authStatusSchema = z.object({
   state: z.enum(["signed-out", "pending", "signed-in"]),
-  /** Present while `state` is "pending". */
   verificationUriComplete: z.string().nullable(),
   userCode: z.string().nullable(),
-  /** Present once signed in. */
   teamSlug: z.string().nullable(),
   projectSlug: z.string().nullable(),
-  /** Set when the last sign-in attempt failed. */
   error: z.string().nullable(),
 });
-
 export type AuthStatus = z.infer<typeof authStatusSchema>;
+
+/**
+ * A debug event. This is the plugin's record of what it asked Vercel and bb
+ * to do and when — it is not user-facing product state, and nothing reads it
+ * to make decisions.
+ */
+const eventSchema = z.object({
+  id: z.string(),
+  at: z.string(),
+  kind: z.enum([
+    "create.requested",
+    "create.sandbox-ready",
+    "create.enrolled",
+    "create.failed",
+    "machine.disconnected",
+    "machine.stopped",
+    "delete.requested",
+  ]),
+  /** Sandbox name, once one exists. */
+  machine: z.string().nullable(),
+  detail: z.string(),
+});
+export type DebugEvent = z.infer<typeof eventSchema>;
+
+/** Local record of a machine this plugin created. */
+const machineRecordSchema = z.object({
+  /** Sandbox name; the stable key across Vercel and this plugin. */
+  name: z.string(),
+  /** bb host id this sandbox enrolled as. */
+  hostId: z.string(),
+  createdAt: z.number(),
+});
+type MachineRecord = z.infer<typeof machineRecordSchema>;
+
+const machineViewSchema = z.object({
+  name: z.string(),
+  hostId: z.string().nullable(),
+  /** bb's name for the machine, once it has connected. */
+  hostName: z.string().nullable(),
+  state: z.enum(["connecting", "running", "inactive", "error"]),
+  /** Human-readable status line for the list. */
+  status: z.string(),
+  /** Milliseconds the sandbox has been up, when running. */
+  uptimeMs: z.number().nullable(),
+  createdAt: z.number(),
+  error: z.string().nullable(),
+});
+export type MachineView = z.infer<typeof machineViewSchema>;
 
 export const rpcContract = defineRpcContract({
   auth_status: { input: z.null(), output: authStatusSchema },
   auth_start: { input: z.null(), output: authStatusSchema },
   auth_cancel: { input: z.null(), output: authStatusSchema },
   auth_sign_out: { input: z.null(), output: authStatusSchema },
-  runs_list: {
+  machines_list: {
     input: z.null(),
-    output: z.object({ runs: z.array(runRecordSchema) }),
-  },
-  runs_clear: { input: z.null(), output: z.object({ cleared: z.number() }) },
-  run_code: {
-    input: z.object({
-      code: z.string().min(1).max(100_000),
-      runtime: runtimeSchema,
+    output: z.object({
+      machines: z.array(machineViewSchema),
+      signedIn: z.boolean(),
+      /** True while a create is in flight, so the page can show a spinner. */
+      creating: z.boolean(),
     }),
-    output: runRecordSchema,
   },
+  machines_create: { input: z.null(), output: z.object({ started: z.boolean() }) },
+  machines_delete: {
+    input: z.object({ name: z.string().min(1) }),
+    output: z.object({ deleted: z.boolean() }),
+  },
+  events_list: {
+    input: z.null(),
+    output: z.object({ events: z.array(eventSchema) }),
+  },
+  events_clear: { input: z.null(), output: z.object({ cleared: z.number() }) },
 });
 
-function truncate(text: string): string {
-  if (text.length <= MAX_OUTPUT_CHARS) return text;
-  return `${text.slice(0, MAX_OUTPUT_CHARS)}\n… truncated ${text.length - MAX_OUTPUT_CHARS} more characters`;
+/** "12h 34m", "7m", "just now". */
+function formatUptime(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return "just now";
+  const hours = Math.floor(minutes / 60);
+  const remaining = minutes % 60;
+  if (hours === 0) return `${remaining}m`;
+  return `${hours}h ${remaining}m`;
 }
 
 export default async function plugin(bb: BbPluginApi) {
   bb.log.info("loaded");
 
   const settings = bb.settings.define({
-    // Written by the sign-in flow, not by hand. It lives in a secret setting
-    // so it lands in the plugin's 0600 secrets directory rather than bb.db.
     vercelSession: {
       type: "string",
       label: "Vercel session (managed by Sign in with Vercel)",
       secret: true,
     },
-    defaultRuntime: {
-      type: "select",
-      label: "Default runtime",
-      options: ["node", "python"],
-      default: "node",
-    },
-    sandboxTimeoutSeconds: {
+    // Vercel caps sandbox lifetime at 45 minutes on Hobby and 24 hours on
+    // Pro/Enterprise; exceeding it fails sandbox creation outright. Default
+    // to the Hobby ceiling, which every plan accepts.
+    machineTimeoutSeconds: {
       type: "string",
-      // Vercel caps sandbox lifetime at 45 minutes on Hobby and 24 hours on
-      // Pro/Enterprise; exceeding it fails sandbox creation outright. Default
-      // to the Hobby ceiling, which every plan accepts.
-      label: "Sandbox timeout (seconds; max 2700 on Hobby, 86400 on Pro)",
+      label: "Machine lifetime (seconds; max 2700 on Hobby, 86400 on Pro)",
       default: "2700",
+    },
+    machineVcpus: {
+      type: "select",
+      label: "vCPUs per machine (2 GB memory each)",
+      options: ["1", "2", "4", "8"],
+      default: "2",
     },
   });
 
-  // In-memory sign-in attempt. Deliberately not persisted: a device code is
-  // short-lived, and a reload should drop a half-finished flow rather than
-  // resume one the user has forgotten about.
   let pending: {
     authorization: DeviceAuthorization;
     controller: AbortController;
   } | null = null;
   let lastAuthError: string | null = null;
-  /** De-duplicates concurrent refreshes so two runs cannot race. */
   let refreshInFlight: Promise<StoredSession> | null = null;
+  /** In-flight machine creations, by a temporary id until the sandbox exists. */
+  const creating = new Set<string>();
+
+  // ---------------------------------------------------------------- events
+
+  async function readEvents(): Promise<DebugEvent[]> {
+    return (await bb.storage.kv.get<DebugEvent[]>("events")) ?? [];
+  }
+  async function record(
+    kind: DebugEvent["kind"],
+    machine: string | null,
+    detail: string,
+  ): Promise<void> {
+    const event: DebugEvent = {
+      id: randomUUID().slice(0, 8),
+      at: new Date().toISOString(),
+      kind,
+      machine,
+      detail: detail.slice(0, 2000),
+    };
+    const events = [event, ...(await readEvents())].slice(0, MAX_EVENTS);
+    await bb.storage.kv.set("events", events);
+    bb.log.info(`${kind}${machine === null ? "" : ` ${machine}`}: ${detail}`);
+  }
+
+  // ------------------------------------------------------------------ auth
 
   async function readStoredSession(): Promise<StoredSession | null> {
     const { vercelSession } = await settings.get();
@@ -144,19 +203,16 @@ export default async function plugin(bb: BbPluginApi) {
     return parsed.success ? parsed.data : null;
   }
 
-  /**
-   * Persist through the settings route, because a settings handle is
-   * read-only by design. Writing the plugin's own id is the sanctioned way
-   * for a plugin to update a value the user did not type.
-   */
   async function writeStoredSession(session: StoredSession | null) {
     await bb.sdk.plugins.updateSettings({
       pluginId: bb.pluginId,
-      values: { vercelSession: session === null ? "" : JSON.stringify(session) },
+      values: {
+        vercelSession: session === null ? "" : JSON.stringify(session),
+      },
     });
   }
 
-  async function describeAuth(): Promise<z.infer<typeof authStatusSchema>> {
+  async function describeAuth(): Promise<AuthStatus> {
     const stored = await readStoredSession();
     if (stored !== null) {
       return {
@@ -189,24 +245,15 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /**
-   * Turn a fresh OAuth session into a stored one by resolving the Vercel team
-   * and project, creating a default project when the user has none.
-   *
    * `cwd` is pinned to a temp directory on purpose: inferScope otherwise reads
    * `.vercel/project.json` relative to `process.cwd()`, which is wherever the
-   * bb server happened to be launched — it must not silently adopt an
-   * unrelated linked project.
+   * bb server happened to be launched.
    */
   async function resolveScope(session: AuthSession): Promise<StoredSession> {
     const scope = await inferScope({
       token: session.accessToken,
       cwd: tmpdir(),
     });
-    if (scope.created) {
-      bb.log.info(
-        `created Vercel project ${scope.projectId} in team ${scope.teamId}`,
-      );
-    }
     return {
       accessToken: session.accessToken,
       refreshToken: session.refreshToken,
@@ -218,7 +265,6 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  /** Return a session whose access token is good for at least REFRESH_SKEW_MS. */
   async function ensureFreshSession(): Promise<StoredSession | null> {
     const stored = await readStoredSession();
     if (stored === null) return null;
@@ -236,46 +282,20 @@ export default async function plugin(bb: BbPluginApi) {
     return refreshInFlight;
   }
 
-  async function readRuns(): Promise<RunRecord[]> {
-    return (await bb.storage.kv.get<RunRecord[]>("runs")) ?? [];
-  }
-  async function recordRun(run: RunRecord): Promise<RunRecord> {
-    const runs = [run, ...(await readRuns())].slice(0, MAX_HISTORY);
-    await bb.storage.kv.set("runs", runs);
-    bb.realtime.publish(RUNS_CHANGED, { count: runs.length });
-    return run;
-  }
-
-  async function resolveConfig(): Promise<{
-    credentials: SandboxCredentials | undefined;
-    defaultRuntime: RuntimeName;
-    sandboxTimeoutMs: number;
-  }> {
-    const values = await settings.get();
+  async function requireCredentials(): Promise<SandboxCredentials> {
     const session = await ensureFreshSession();
-    const seconds = Number.parseInt(values.sandboxTimeoutSeconds, 10);
+    if (session === null) {
+      throw new Error(
+        "Not signed in to Vercel. Use Sign in with Vercel on this plugin's settings page.",
+      );
+    }
     return {
-      credentials:
-        session === null
-          ? undefined
-          : {
-              token: session.accessToken,
-              teamId: session.teamId,
-              projectId: session.projectId,
-            },
-      defaultRuntime: values.defaultRuntime as RuntimeName,
-      sandboxTimeoutMs:
-        Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 2_700_000,
+      token: session.accessToken,
+      teamId: session.teamId,
+      projectId: session.projectId,
     };
   }
 
-  if ((await readStoredSession()) === null) {
-    bb.status.needsConfiguration(
-      "Not signed in to Vercel. Use Sign in with Vercel on this plugin's settings page.",
-    );
-  }
-
-  /** Drive a sign-in to completion in the background. */
   function beginSignIn(authorization: DeviceAuthorization) {
     const controller = new AbortController();
     pending = { authorization, controller };
@@ -291,8 +311,7 @@ export default async function plugin(bb: BbPluginApi) {
         const stored = await resolveScope(session);
         pending = null;
         // Written last: persisting while the plugin is in needs-configuration
-        // makes bb retry the load, which replaces this generation and makes
-        // the captured `bb` handle stale.
+        // makes bb retry the load, which replaces this generation.
         await writeStoredSession(stored);
       } catch (error) {
         pending = null;
@@ -302,13 +321,12 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         bb.realtime.publish(AUTH_CHANGED, {});
       } catch {
-        // The generation was replaced by the settings write above; the next
-        // load reports the new state anyway.
+        // Generation replaced by the settings write above.
       }
     })();
   }
 
-  async function startSignIn() {
+  async function startSignIn(): Promise<AuthStatus> {
     if (pending !== null) return describeAuth();
     if ((await readStoredSession()) !== null) return describeAuth();
     const authorization = await startDeviceAuthorization();
@@ -316,47 +334,232 @@ export default async function plugin(bb: BbPluginApi) {
     return describeAuth();
   }
 
-  async function signOut() {
+  async function signOut(): Promise<AuthStatus> {
     pending?.controller.abort();
     pending = null;
     lastAuthError = null;
     const stored = await readStoredSession();
     if (stored !== null) {
-      // Best effort: a failed revocation must not strand the local session.
       await revokeToken(stored.accessToken).catch(() => undefined);
       await writeStoredSession(null);
     }
     return describeAuth();
   }
 
-  async function execute(
-    code: string,
-    runtime: RuntimeName,
-  ): Promise<RunRecord> {
-    const config = await resolveConfig();
-    if (config.credentials === undefined) {
-      throw new Error(
-        "Not signed in to Vercel. Use Sign in with Vercel on this plugin's settings page.",
-      );
+  // -------------------------------------------------------------- machines
+
+  async function readRecords(): Promise<MachineRecord[]> {
+    return (await bb.storage.kv.get<MachineRecord[]>("machines")) ?? [];
+  }
+  async function writeRecords(records: MachineRecord[]): Promise<void> {
+    await bb.storage.kv.set("machines", records);
+    bb.realtime.publish(MACHINES_CHANGED, { count: records.length });
+  }
+
+  /**
+   * Ask bb for a join code and bb connect for a machine code.
+   *
+   * The connect machine code is what makes this work at all: it carries the
+   * publicly reachable tunnel URL. bb listens on loopback by default, and a
+   * sandbox on the public internet cannot dial 127.0.0.1.
+   */
+  async function mintEnrollment(): Promise<EnrollmentDetails> {
+    const join = await bb.sdk.hosts.createJoinCode();
+    const machine = await bb.sdk.plugins.callRpc({
+      pluginId: "connect",
+      method: "createMachineCode",
+      input: null,
+      outputSchema: z.object({
+        code: z.string(),
+        expiresAt: z.number(),
+        serverUrl: z.string(),
+      }),
+    });
+    return {
+      joinCode: join.joinCode,
+      hostId: join.hostId,
+      serverUrl: machine.serverUrl,
+      machineCode: machine.code,
+    };
+  }
+
+  /** Derive the list the page renders, from Vercel plus bb's host registry. */
+  async function describeMachines(): Promise<{
+    machines: MachineView[];
+    signedIn: boolean;
+    creating: boolean;
+  }> {
+    const session = await ensureFreshSession();
+    if (session === null) {
+      return { machines: [], signedIn: false, creating: creating.size > 0 };
     }
-    const result = await runCode(code, runtime, {
-      credentials: config.credentials,
-      sandboxTimeoutMs: config.sandboxTimeoutMs,
-      commandTimeoutMs: config.sandboxTimeoutMs,
+    const credentials: SandboxCredentials = {
+      token: session.accessToken,
+      teamId: session.teamId,
+      projectId: session.projectId,
+    };
+
+    const [sandboxes, records, hosts] = await Promise.all([
+      listMachines(credentials),
+      readRecords(),
+      bb.sdk.hosts.list(),
+    ]);
+    const recordByName = new Map(records.map((r) => [r.name, r]));
+    const hostById = new Map(hosts.map((h) => [h.id, h]));
+
+    const views: MachineView[] = sandboxes.map((sandbox) => {
+      const record = recordByName.get(sandbox.name) ?? null;
+      const host = record === null ? null : (hostById.get(record.hostId) ?? null);
+      const uptimeMs = Date.now() - sandbox.createdAt;
+
+      if (sandbox.status === "failed" || sandbox.status === "aborted") {
+        return {
+          name: sandbox.name,
+          hostId: record?.hostId ?? null,
+          hostName: host?.name ?? null,
+          state: "error" as const,
+          status: `Error (${sandbox.status})`,
+          uptimeMs: null,
+          createdAt: sandbox.createdAt,
+          error: `Sandbox ${sandbox.status}`,
+        };
+      }
+      if (sandbox.status !== "running" && sandbox.status !== "pending") {
+        return {
+          name: sandbox.name,
+          hostId: record?.hostId ?? null,
+          hostName: host?.name ?? null,
+          state: "inactive" as const,
+          status: "Inactive",
+          uptimeMs: null,
+          createdAt: sandbox.createdAt,
+          error: null,
+        };
+      }
+      // The sandbox is up. It is only a usable machine once its daemon has
+      // dialled home, so bb's host registry is the authority on "running".
+      if (host?.status === "connected") {
+        return {
+          name: sandbox.name,
+          hostId: record?.hostId ?? null,
+          hostName: host.name,
+          state: "running" as const,
+          status: `Running for ${formatUptime(uptimeMs)}`,
+          uptimeMs,
+          createdAt: sandbox.createdAt,
+          error: null,
+        };
+      }
+      return {
+        name: sandbox.name,
+        hostId: record?.hostId ?? null,
+        hostName: host?.name ?? null,
+        state: "connecting" as const,
+        status: "Connecting",
+        uptimeMs: null,
+        createdAt: sandbox.createdAt,
+        error: null,
+      };
     });
 
-    return recordRun({
-      id: randomUUID().slice(0, 8),
-      startedAt: new Date().toISOString(),
-      runtime,
-      input: truncate(code),
-      sandboxName: result.sandboxName,
-      exitCode: result.exitCode,
-      stdout: truncate(result.stdout),
-      stderr: truncate(result.stderr),
-      createdInMs: result.createdInMs,
-      ranInMs: result.ranInMs,
-    });
+    // Detect machines that dropped off since the last look. There is no push
+    // event for a sandbox ending, so a poll-time transition is the only signal.
+    for (const view of views) {
+      if (view.state !== "inactive" && view.state !== "error") continue;
+      if (!recordByName.has(view.name)) continue;
+      await record_disconnect(view);
+    }
+
+    return { machines: views, signedIn: true, creating: creating.size > 0 };
+  }
+
+  /** Log a machine's first observed disconnect, then forget it. */
+  async function record_disconnect(view: MachineView): Promise<void> {
+    const records = await readRecords();
+    const remaining = records.filter((r) => r.name !== view.name);
+    if (remaining.length === records.length) return;
+    await record(
+      "machine.disconnected",
+      view.name,
+      `Machine is no longer running (${view.status}).`,
+    );
+    await writeRecords(remaining);
+  }
+
+  async function startCreate(): Promise<boolean> {
+    const credentials = await requireCredentials();
+    const values = await settings.get();
+    const seconds = Number.parseInt(values.machineTimeoutSeconds, 10);
+    const timeoutMs =
+      Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 2_700_000;
+    const vcpus = Number.parseInt(values.machineVcpus, 10);
+
+    const ticket = randomUUID().slice(0, 8);
+    creating.add(ticket);
+    bb.realtime.publish(MACHINES_CHANGED, {});
+
+    void (async () => {
+      try {
+        await record("create.requested", null, "Creating a cloud machine.");
+        const enrollment = await mintEnrollment();
+        const result = await createMachine({
+          credentials,
+          enrollment,
+          timeoutMs,
+          vcpus: Number.isFinite(vcpus) ? vcpus : 2,
+          onCreated: async (name) => {
+            // The list can show a "Connecting" row from here, well before the
+            // multi-minute enrollment finishes.
+            await writeRecords([
+              {
+                name,
+                hostId: enrollment.hostId,
+                createdAt: Date.now(),
+              },
+              ...(await readRecords()),
+            ]);
+            await record("create.sandbox-ready", name, "Sandbox created.");
+          },
+        });
+        await record(
+          "create.enrolled",
+          result.name,
+          "Machine enrolled and connected to bb.",
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        await record("create.failed", null, message);
+      } finally {
+        creating.delete(ticket);
+        bb.realtime.publish(MACHINES_CHANGED, {});
+      }
+    })();
+
+    return true;
+  }
+
+  async function deleteMachine(name: string): Promise<boolean> {
+    const credentials = await requireCredentials();
+    await record("delete.requested", name, "Stopping machine.");
+    await stopMachine(credentials, name).catch(() => undefined);
+
+    const records = await readRecords();
+    const target = records.find((r) => r.name === name) ?? null;
+    if (target !== null) {
+      // Drop the bb host registration too, so a dead machine does not linger
+      // in the machine picker.
+      await bb.sdk.hosts.delete({ hostId: target.hostId }).catch(() => undefined);
+      await writeRecords(records.filter((r) => r.name !== name));
+    }
+    await record("machine.stopped", name, "Machine stopped.");
+    return true;
+  }
+
+  if ((await readStoredSession()) === null) {
+    bb.status.needsConfiguration(
+      "Not signed in to Vercel. Use Sign in with Vercel on this plugin's settings page.",
+    );
   }
 
   bb.rpc.register(rpcContract, {
@@ -368,14 +571,17 @@ export default async function plugin(bb: BbPluginApi) {
       return describeAuth();
     },
     auth_sign_out: () => signOut(),
-    runs_list: async () => ({ runs: await readRuns() }),
-    runs_clear: async () => {
-      const cleared = (await readRuns()).length;
-      await bb.storage.kv.set("runs", []);
-      bb.realtime.publish(RUNS_CHANGED, { count: 0 });
+    machines_list: () => describeMachines(),
+    machines_create: async () => ({ started: await startCreate() }),
+    machines_delete: async ({ name }) => ({
+      deleted: await deleteMachine(name),
+    }),
+    events_list: async () => ({ events: await readEvents() }),
+    events_clear: async () => {
+      const cleared = (await readEvents()).length;
+      await bb.storage.kv.set("events", []);
       return { cleared };
     },
-    run_code: ({ code, runtime }) => execute(code, runtime),
   });
 
   bb.onDispose(() => {

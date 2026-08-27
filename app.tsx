@@ -1,14 +1,8 @@
-// bb-plugin-cloud-sandbox — a BB plugin frontend entry.
+// bb-plugin-cloud-sandbox — frontend entry.
 //
 // Compiled by `bb plugin build` into dist/app.js + dist/app.css. React and
-// @get-bb/plugin-sdk/app are provided by the BB app at load time (never
-// bundled), so this file must be loaded by BB, not imported directly.
-//
-// The components under components/ui/ are YOURS: vendored source (shadcn
-// model), edit freely. Add more from the BB registry with
-// `npx shadcn add @bb/<name>` (see components.json).
-import { useCallback, useEffect, useState } from "react";
-import type { FormEvent } from "react";
+// @get-bb/plugin-sdk/app are provided by the BB app at load time.
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
   useBbNavigate,
@@ -16,108 +10,196 @@ import {
   useRpc,
   UrlLink,
 } from "@get-bb/plugin-sdk/app";
-import type { AuthStatus, rpcContract, RunRecord } from "./server";
+import type { AuthStatus, DebugEvent, MachineView, rpcContract } from "./server";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-type Runtime = "node" | "python";
+/** Background refresh cadence while the page is open. */
+const POLL_MS = 45_000;
 
-const PLACEHOLDER: Record<Runtime, string> = {
-  node: 'console.log("hello from the sandbox");',
-  python: 'print("hello from the sandbox")',
-};
-
-function useSandbox() {
-  const rpc = useRpc<typeof rpcContract>();
-  const [runs, setRuns] = useState<RunRecord[] | null>(null);
-  const [signedIn, setSignedIn] = useState<boolean | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const report = useCallback((cause: unknown) => {
-    setError(cause instanceof Error ? cause.message : String(cause));
-  }, []);
-
-  const refetch = useCallback(() => {
-    rpc.call("runs_list").then((result) => setRuns(result.runs), report);
-    rpc
-      .call("auth_status")
-      .then((result) => setSignedIn(result.state === "signed-in"), report);
-  }, [rpc, report]);
-
-  useEffect(refetch, [refetch]);
-  // server.ts publishes after every run — from this page, another window, or
-  // `bb cloud-sandbox run` invoked by an agent — so the list never goes stale.
-  useRealtime("runs-changed", refetch);
-  useRealtime("auth-changed", refetch);
-
-  return { rpc, runs, signedIn, error, setError, report, refetch };
-}
-
-function OutputBlock({ label, text }: { label: string; text: string }) {
-  if (text.trim() === "") return null;
+function Spinner({ className }: { className?: string }) {
   return (
-    <div className="mt-2">
-      <div className="text-xs font-medium text-muted-foreground">{label}</div>
-      <pre className="mt-1 max-h-64 overflow-auto rounded-md border border-border bg-card p-2 font-mono text-xs whitespace-pre-wrap">
-        {text.trimEnd()}
-      </pre>
-    </div>
+    <span
+      aria-hidden
+      className={cn(
+        "inline-block size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent",
+        className,
+      )}
+    />
   );
 }
 
-function RunCard({ run }: { run: RunRecord }) {
-  const failed = run.exitCode !== 0;
+const STATE_STYLES: Record<MachineView["state"], string> = {
+  running: "text-foreground",
+  connecting: "text-muted-foreground",
+  inactive: "text-muted-foreground",
+  error: "text-destructive",
+};
+
+function MachineRow({
+  machine,
+  onDelete,
+  busy,
+}: {
+  machine: MachineView;
+  onDelete: () => void;
+  busy: boolean;
+}) {
   return (
-    <li className="rounded-lg border border-border p-3">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
-        <span
+    <li className="flex items-center gap-3 rounded-lg border border-border p-3">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium">
+          {machine.hostName ?? machine.name}
+        </p>
+        <p
           className={cn(
-            "font-medium",
-            failed ? "text-destructive" : "text-foreground",
+            "mt-0.5 flex items-center gap-1.5 text-xs",
+            STATE_STYLES[machine.state],
           )}
         >
-          exit {run.exitCode}
-        </span>
-        <span className="text-muted-foreground">
-          {run.runtime ?? "command"} · boot {run.createdInMs}ms · run{" "}
-          {run.ranInMs}ms
-        </span>
-        <span className="ml-auto font-mono text-muted-foreground">
-          {run.sandboxName}
-        </span>
+          {machine.state === "connecting" ? <Spinner /> : null}
+          {machine.status}
+        </p>
+        {machine.hostName !== null ? (
+          <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
+            {machine.name}
+          </p>
+        ) : null}
       </div>
-      <pre className="mt-2 max-h-32 overflow-auto font-mono text-xs whitespace-pre-wrap text-muted-foreground">
-        {run.input}
-      </pre>
-      <OutputBlock label="stdout" text={run.stdout} />
-      <OutputBlock label="stderr" text={run.stderr} />
+      <Button variant="outline" size="sm" onClick={onDelete} disabled={busy}>
+        {machine.state === "inactive" || machine.state === "error"
+          ? "Remove"
+          : "Stop"}
+      </Button>
     </li>
   );
 }
 
-function SandboxPage() {
-  const { rpc, runs, signedIn, error, setError, report, refetch } = useSandbox();
-  const clearHistory = () => {
-    rpc.call("runs_clear").then(refetch, report);
-  };
-  const [runtime, setRuntime] = useState<Runtime>("node");
-  const [code, setCode] = useState("");
-  const [isRunning, setIsRunning] = useState(false);
+function DebugLog() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [open, setOpen] = useState(false);
+  const [events, setEvents] = useState<DebugEvent[] | null>(null);
 
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    const trimmed = code.trim();
-    if (trimmed === "" || isRunning) return;
-    setIsRunning(true);
+  useEffect(() => {
+    if (!open) return;
+    rpc.call("events_list").then(
+      (result) => setEvents(result.events),
+      () => setEvents([]),
+    );
+  }, [open, rpc]);
+
+  return (
+    <div className="rounded-lg border border-border">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex w-full items-center justify-between p-3 text-left text-sm font-medium"
+      >
+        Debug log
+        <span className="text-xs text-muted-foreground">
+          {open ? "Hide" : "Show"}
+        </span>
+      </button>
+      {open ? (
+        <div className="border-t border-border p-3">
+          {events === null ? (
+            <p className="text-xs text-muted-foreground">Loading…</p>
+          ) : events.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No events recorded.</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {events.map((event) => (
+                <li key={event.id} className="font-mono text-xs">
+                  <span className="text-muted-foreground">{event.at}</span>{" "}
+                  <span className="font-medium">{event.kind}</span>
+                  {event.machine === null ? null : (
+                    <span className="text-muted-foreground">
+                      {" "}
+                      {event.machine}
+                    </span>
+                  )}
+                  <span className="text-muted-foreground"> — {event.detail}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function MachinesPage() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [machines, setMachines] = useState<MachineView[] | null>(null);
+  const [signedIn, setSignedIn] = useState<boolean | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [busyName, setBusyName] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
+
+  const refetch = useCallback(
+    (manual = false) => {
+      // A slow list must not stack up behind the interval timer.
+      if (inFlight.current) return;
+      inFlight.current = true;
+      if (manual) setRefreshing(true);
+      rpc.call("machines_list").then(
+        (result) => {
+          inFlight.current = false;
+          setRefreshing(false);
+          setMachines(result.machines);
+          setSignedIn(result.signedIn);
+          setCreating(result.creating);
+          setError(null);
+        },
+        (cause: unknown) => {
+          inFlight.current = false;
+          setRefreshing(false);
+          setError(cause instanceof Error ? cause.message : String(cause));
+        },
+      );
+    },
+    [rpc],
+  );
+
+  useEffect(() => {
+    refetch();
+  }, [refetch]);
+
+  // Only while the page is mounted; the interval is cleared on unmount.
+  useEffect(() => {
+    const timer = setInterval(() => refetch(), POLL_MS);
+    return () => clearInterval(timer);
+  }, [refetch]);
+
+  // Creation and disconnect detection both publish, so the list reacts
+  // immediately rather than waiting out the poll interval.
+  useRealtime("machines-changed", () => refetch());
+
+  const create = () => {
+    setCreating(true);
     setError(null);
-    rpc.call("run_code", { code: trimmed, runtime }).then(
+    rpc.call("machines_create").then(
+      () => refetch(),
+      (cause: unknown) => {
+        setCreating(false);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      },
+    );
+  };
+
+  const remove = (name: string) => {
+    setBusyName(name);
+    rpc.call("machines_delete", { name }).then(
       () => {
-        setIsRunning(false);
+        setBusyName(null);
         refetch();
       },
       (cause: unknown) => {
-        setIsRunning(false);
-        report(cause);
+        setBusyName(null);
+        setError(cause instanceof Error ? cause.message : String(cause));
       },
     );
   };
@@ -125,6 +207,28 @@ function SandboxPage() {
   return (
     <div className="h-full overflow-auto p-4 md:p-5">
       <div className="mx-auto w-full max-w-3xl space-y-4">
+        <div className="flex items-center gap-2">
+          <Button size="sm" onClick={create} disabled={creating || !signedIn}>
+            {creating ? (
+              <>
+                <Spinner className="mr-2" />
+                Creating…
+              </>
+            ) : (
+              "Create cloud machine"
+            )}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="ml-auto"
+            onClick={() => refetch(true)}
+            disabled={refreshing}
+          >
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </Button>
+        </div>
+
         {signedIn === false ? (
           <div className="rounded-lg border border-border p-3 text-sm">
             <p className="font-medium">Not signed in to Vercel.</p>
@@ -135,71 +239,35 @@ function SandboxPage() {
           </div>
         ) : null}
 
-        <form onSubmit={submit} className="space-y-2">
-          <div className="flex items-center gap-2">
-            {(["node", "python"] as const).map((candidate) => (
-              <Button
-                key={candidate}
-                type="button"
-                variant={runtime === candidate ? "default" : "outline"}
-                size="sm"
-                onClick={() => setRuntime(candidate)}
-              >
-                {candidate}
-              </Button>
-            ))}
-            <Button
-              type="submit"
-              size="sm"
-              className="ml-auto"
-              disabled={isRunning || code.trim() === ""}
-            >
-              {isRunning ? "Running…" : "Run in sandbox"}
-            </Button>
-          </div>
-          <textarea
-            value={code}
-            onChange={(event) => setCode(event.target.value)}
-            placeholder={PLACEHOLDER[runtime]}
-            spellCheck={false}
-            rows={8}
-            aria-label={`${runtime} source to run in the sandbox`}
-            className="w-full rounded-md border border-border bg-card p-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          />
-        </form>
-
         {error !== null ? (
           <p className="text-sm text-destructive">{error}</p>
         ) : null}
 
-        {runs === null ? (
+        {machines === null ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : runs.length === 0 ? (
+        ) : machines.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No runs yet. Each run boots a fresh, isolated Vercel Sandbox.
+            No cloud machines yet. Each one is a Vercel Sandbox that joins bb as
+            a machine you can run threads on.
           </p>
         ) : (
-          <>
-            <div className="flex items-center justify-between">
-              <p className="text-sm text-muted-foreground">
-                {runs.length} recent {runs.length === 1 ? "run" : "runs"}
-              </p>
-              <Button variant="outline" size="sm" onClick={clearHistory}>
-                Clear history
-              </Button>
-            </div>
-            <ul className="space-y-3">
-              {runs.map((run) => (
-                <RunCard key={run.id} run={run} />
-              ))}
-            </ul>
-          </>
+          <ul className="space-y-2">
+            {machines.map((machine) => (
+              <MachineRow
+                key={machine.name}
+                machine={machine}
+                busy={busyName === machine.name}
+                onDelete={() => remove(machine.name)}
+              />
+            ))}
+          </ul>
         )}
+
+        <DebugLog />
       </div>
     </div>
   );
 }
-
 
 /** The "Sign in with Vercel" flow, rendered on the plugin's settings page. */
 function VercelAuthSection() {
@@ -222,8 +290,7 @@ function VercelAuthSection() {
   useRealtime("auth-changed", refetch);
 
   // The device flow completes in a browser tab the plugin cannot observe, so
-  // poll while it is outstanding. The realtime signal above usually wins; this
-  // is the fallback when it does not arrive.
+  // poll while it is outstanding.
   useEffect(() => {
     if (status?.state !== "pending") return;
     const timer = setInterval(refetch, 2500);
@@ -236,7 +303,6 @@ function VercelAuthSection() {
     rpc.call("auth_start").then((next) => {
       setBusy(false);
       setStatus(next);
-      // Open the approval page for the user rather than making them copy a URL.
       if (next.verificationUriComplete !== null) {
         navigate.openUrl(next.verificationUriComplete);
       }
@@ -252,10 +318,6 @@ function VercelAuthSection() {
     }, report);
   };
 
-  const cancel = () => {
-    rpc.call("auth_cancel").then(setStatus, report);
-  };
-
   if (status === null) {
     return <p className="text-sm text-muted-foreground">Loading…</p>;
   }
@@ -265,10 +327,7 @@ function VercelAuthSection() {
       <div className="space-y-2 text-sm">
         <p>
           Signed in to Vercel — team{" "}
-          <span className="font-medium">{status.teamSlug ?? "unknown"}</span>,
-          project{" "}
-          <span className="font-medium">{status.projectSlug ?? "unknown"}</span>
-          .
+          <span className="font-medium">{status.teamSlug ?? "unknown"}</span>.
         </p>
         <Button variant="outline" size="sm" onClick={signOut} disabled={busy}>
           Sign out
@@ -292,7 +351,11 @@ function VercelAuthSection() {
           . Confirmation code:{" "}
           <code className="font-mono">{status.userCode}</code>
         </p>
-        <Button variant="outline" size="sm" onClick={cancel}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => rpc.call("auth_cancel").then(setStatus, report)}
+        >
           Cancel
         </Button>
       </div>
@@ -302,7 +365,7 @@ function VercelAuthSection() {
   return (
     <div className="space-y-2 text-sm">
       <p className="text-muted-foreground">
-        Connect a Vercel account to run code in a sandbox. Your Vercel team and
+        Connect a Vercel account to create cloud machines. Your Vercel team and
         project are detected automatically — a project is created for you if you
         do not have one.
       </p>
@@ -321,15 +384,14 @@ export default definePluginApp((app) => {
     id: "vercel-auth",
     title: "Vercel account",
     description:
-      "Cloud Sandbox runs code on Vercel. Sign in once; the session refreshes itself.",
+      "Cloud machines run on Vercel. Sign in once; the session refreshes itself.",
     component: VercelAuthSection,
   });
   app.slots.navPanel({
-    id: "cloud-sandbox",
-    title: "Cloud Sandbox",
+    id: "cloud-machines",
+    title: "Cloud Machines",
     icon: "Cloud",
-    // Routed at /plugins/cloud-sandbox/cloud-sandbox.
-    path: "cloud-sandbox",
-    component: SandboxPage,
+    path: "cloud-machines",
+    component: MachinesPage,
   });
 });
