@@ -23,8 +23,8 @@ import {
   listMachines,
   stopMachine,
   type EnrollmentDetails,
+  type SandboxCredentials,
 } from "./machines.js";
-import type { SandboxCredentials } from "./sandbox.js";
 
 /** Debug events kept for troubleshooting. Bounded to stay under the kv cap. */
 const MAX_EVENTS = 200;

@@ -7,7 +7,7 @@
 // grant directly is ~100 lines of a standard spec, keeps the client id
 // swappable, and depends only on Vercel's public discovery document.
 //
-// Like sandbox.ts this module carries no bb dependency.
+// Like machines.ts this module carries no bb dependency.
 
 /**
  * The client id @vercel/sandbox ships. It works out of the box, but it is

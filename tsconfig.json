@@ -23,9 +23,7 @@
   },
   "include": [
     "server.ts",
-    "sandbox.ts",
     "app.tsx",
-    "scripts",
     "components",
     "lib",
     "hooks"

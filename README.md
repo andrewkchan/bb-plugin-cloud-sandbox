@@ -43,19 +43,6 @@ plan accepts; raise it if your team is on Pro.
 limit whatever it is doing, and the machine goes `Inactive`. This is a
 property of the platform, not something the plugin can extend.
 
-## Verifying the sandbox without bb
-
-`scripts/verify-sandbox.ts` boots a real sandbox, runs a Node snippet, prints
-the captured output, and exits non-zero if anything came back wrong. It is
-independent of the plugin and authenticates from the environment:
-
-```sh
-vercel link && vercel env pull   # writes .env.local with VERCEL_OIDC_TOKEN
-npm run verify:sandbox
-```
-
-It also accepts `VERCEL_TOKEN` + `VERCEL_TEAM_ID` + `VERCEL_PROJECT_ID`.
-
 ## Development
 
 ```sh
@@ -69,12 +56,10 @@ bb plugin logs cloud-sandbox -f
 
 | File | Role |
 | --- | --- |
-| `sandbox.ts` | Boots a sandbox, stages files, runs one command, captures output. No bb dependency. |
-| `machines.ts` | Cloud machine lifecycle: create, enrol, list, stop. No bb dependency. |
+| `machines.ts` | Cloud machine lifecycle: create, enrol, list, stop, delete. No bb dependency. |
 | `auth.ts` | Vercel OAuth device authorization (RFC 8628). No bb dependency. |
 | `server.ts` | Settings, RPC, sign-in orchestration, machine state, debug log. |
 | `app.tsx` | The Cloud Machines page and the Vercel account settings section. |
-| `scripts/verify-sandbox.ts` | Standalone end-to-end sandbox check. |
 
 ## How enrolment works
 

@@ -52,7 +52,6 @@
   },
   "scripts": {
     "build": "bb plugin build",
-    "typecheck": "tsc --noEmit",
-    "verify:sandbox": "node scripts/verify-sandbox.ts"
+    "typecheck": "tsc --noEmit"
   }
 }

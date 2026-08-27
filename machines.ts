@@ -1,11 +1,21 @@
 // Cloud machine lifecycle: a Vercel Sandbox that enrolls itself as a bb
 // machine and stays running.
 //
-// Like sandbox.ts and auth.ts this module carries no bb dependency; the
-// caller supplies the enrollment details it obtained from bb.
+// Like auth.ts this module carries no bb dependency; the caller supplies the
+// enrollment details it obtained from bb.
 import { randomUUID } from "node:crypto";
 import { Sandbox, Snapshot } from "@vercel/sandbox";
-import type { SandboxCredentials } from "./sandbox.js";
+
+/**
+ * Explicit Vercel API credentials. `@vercel/sandbox` requires all three or
+ * none: with none it falls back to the `VERCEL_OIDC_TOKEN` environment
+ * variable and derives team and project from that token's claims.
+ */
+export interface SandboxCredentials {
+  token: string;
+  teamId: string;
+  projectId: string;
+}
 
 /**
  * Every sandbox this plugin creates is named with this prefix so listing can
