@@ -621,8 +621,14 @@ function MachinesPage() {
           <div className="rounded-lg border border-border p-3 text-sm">
             <p className="font-medium">Not signed in to Vercel.</p>
             <p className="mt-1 text-muted-foreground">
-              Use <span className="font-medium">Sign in with Vercel</span> on
-              this plugin&apos;s settings page to connect your account.
+              Use <span className="font-medium">Sign in with Vercel</span> on{" "}
+              <UrlLink
+                href={SETTINGS_AUTH_HREF}
+                className="underline underline-offset-2 hover:text-foreground"
+              >
+                this plugin&apos;s settings page
+              </UrlLink>{" "}
+              to connect your account.
             </p>
           </div>
         ) : null}
@@ -1535,10 +1541,14 @@ function VercelAuthSection() {
   );
 }
 
-/** Images, Agents and Configuration, per the plugin's settings page. */
-/** Route of this plugin's settings page; `#images` opens the Images tab. */
+/**
+ * Routes into this plugin's settings page. The tab is component state, so a
+ * deep link carries it in the hash.
+ */
 export const SETTINGS_TEMPLATES_HREF =
   "/settings/plugins/cloud-sandbox#templates";
+export const SETTINGS_AUTH_HREF =
+  "/settings/plugins/cloud-sandbox#authentication";
 
 const SETTINGS_TABS = ["templates", "authentication"] as const;
 
@@ -1549,6 +1559,18 @@ function CloudSandboxSettings() {
       typeof window === "undefined" ? "" : window.location.hash.replace("#", "");
     return (SETTINGS_TABS as readonly string[]).includes(hash) ? hash : "templates";
   });
+
+  // The hash is read on mount, which covers arriving from another page. This
+  // also handles a link followed while the settings page is already open,
+  // where the component does not remount.
+  useEffect(() => {
+    const onHashChange = () => {
+      const hash = window.location.hash.replace("#", "");
+      if ((SETTINGS_TABS as readonly string[]).includes(hash)) setTab(hash);
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
   return (
     <Tabs value={tab} onValueChange={setTab}>
       <TabsList>
