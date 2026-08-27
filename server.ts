@@ -19,6 +19,7 @@ import {
 } from "./auth.js";
 import {
   createMachine,
+  destroyMachine,
   listMachines,
   stopMachine,
   type EnrollmentDetails,
@@ -67,6 +68,7 @@ const eventSchema = z.object({
     "create.failed",
     "machine.disconnected",
     "machine.stopped",
+    "machine.deleted",
     "delete.requested",
   ]),
   /** Sandbox name, once one exists. */
@@ -608,14 +610,34 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /**
-   * Forget the machine: stop it, drop its bb host registration, drop the local
-   * record, and hide the row. Unlike stopping, this is not reversible — the
-   * daemon's stored credentials become useless once the host is deleted.
+   * Forget the machine: delete the sandbox and its snapshots, drop its bb host
+   * registration, drop the local record, and hide the row. Nothing here is
+   * reversible.
    */
   async function removeMachineByName(name: string): Promise<boolean> {
     const credentials = await requireCredentials();
     await record("delete.requested", name, "Removing machine.");
-    await stopMachine(credentials, name).catch(() => undefined);
+    try {
+      const { snapshotsDeleted, snapshotFailures } = await destroyMachine(
+        credentials,
+        name,
+      );
+      await record(
+        "machine.deleted",
+        name,
+        snapshotFailures.length === 0
+          ? `Sandbox deleted with ${snapshotsDeleted} snapshot(s).`
+          : `Sandbox deleted with ${snapshotsDeleted} snapshot(s); ${snapshotFailures.length} snapshot(s) could not be deleted: ${snapshotFailures.join("; ")}`,
+      );
+    } catch (error) {
+      // The bb-side cleanup below still runs: a sandbox that cannot be deleted
+      // must not strand the machine in the list forever.
+      await record(
+        "machine.deleted",
+        name,
+        `Could not delete the sandbox: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     const records = await readRecords();
     const target = records.find((r) => r.name === name) ?? null;
@@ -627,7 +649,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
     await dismiss(name);
     bb.realtime.publish(MACHINES_CHANGED, {});
-    await record("machine.stopped", name, "Machine removed.");
     return true;
   }
 

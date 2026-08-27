@@ -129,9 +129,18 @@ building native modules, so a new machine sits at `Connecting` for a while.
   laptop. Only an explicit **Remove** deletes the host and the record.
 - **Stop** and **Remove** are different operations. Stop ends the sandbox but
   keeps the record and the bb host, so the machine stays listed as `Inactive`
-  and could be woken later. Remove is not reversible: it deletes the bb host,
-  which makes the credentials in the sandbox filesystem useless, drops the
-  local record, and hides the row.
+  and could be woken later. Remove is not reversible: it deletes the Vercel
+  sandbox and every snapshot belonging to it, deletes the bb host, drops the
+  local record, and hides the row. It is styled destructively for that reason.
+- Deleting snapshots matters more than it looks. Stopping a sandbox can
+  produce one even when `persistent` was never requested, and they are not
+  small — a single machine left a 937 MB snapshot behind during development.
+  Remove deletes them; Stop deliberately does not, because a snapshot is what
+  a future wake would restore from.
+- Removal order is deliberate: stop, then delete snapshots, then delete the
+  sandbox. `delete()` leaves the instance inert, so listing snapshots
+  afterwards would throw. A snapshot that will not delete is reported in the
+  debug log rather than blocking the rest of the removal.
 - Removing is the *only* way a row leaves the list. The list is derived from
   `Sandbox.list()`, and Vercel keeps returning stopped sandboxes indefinitely,
   so removed names are held in a bounded `dismissed` set in `bb.storage.kv`

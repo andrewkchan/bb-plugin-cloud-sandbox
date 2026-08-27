@@ -5,7 +5,7 @@
 // Like sandbox.ts and auth.ts this module carries no bb dependency; the
 // caller supplies the enrollment details it obtained from bb.
 import { randomUUID } from "node:crypto";
-import { Sandbox } from "@vercel/sandbox";
+import { Sandbox, Snapshot } from "@vercel/sandbox";
 import type { SandboxCredentials } from "./sandbox.js";
 
 /**
@@ -150,6 +150,57 @@ export async function listMachines(
       timeoutMs: entry.timeout ?? null,
     }))
     .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+/**
+ * Permanently delete a machine's sandbox and every snapshot belonging to it.
+ *
+ * Order matters. The sandbox is stopped first because stopping a persistent
+ * sandbox can itself produce a snapshot, and snapshots are deleted before the
+ * sandbox because `delete()` leaves the instance inert — any later call on it,
+ * including listSnapshots, throws.
+ *
+ * A snapshot that will not delete does not block deleting the sandbox; the
+ * failures are returned so the caller can report them rather than silently
+ * leaving storage behind.
+ */
+export async function destroyMachine(
+  credentials: SandboxCredentials,
+  name: string,
+): Promise<{ snapshotsDeleted: number; snapshotFailures: string[] }> {
+  const sandbox = await Sandbox.get({ ...credentials, name });
+  await sandbox.stop().catch(() => undefined);
+
+  let snapshotsDeleted = 0;
+  const snapshotFailures: string[] = [];
+  const snapshots = await sandbox
+    .listSnapshots()
+    .then((paginator) => paginator.toArray())
+    .catch((error: unknown) => {
+      snapshotFailures.push(
+        `could not list snapshots: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    });
+
+  for (const entry of snapshots) {
+    if (entry.status === "deleted") continue;
+    try {
+      const snapshot = await Snapshot.get({
+        ...credentials,
+        snapshotId: entry.id,
+      });
+      await snapshot.delete();
+      snapshotsDeleted += 1;
+    } catch (error) {
+      snapshotFailures.push(
+        `${entry.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  await sandbox.delete();
+  return { snapshotsDeleted, snapshotFailures };
 }
 
 /** Stop one machine's sandbox. Safe to call on an already-stopped sandbox. */

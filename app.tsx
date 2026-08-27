@@ -72,8 +72,10 @@ function MachineRow({
           </p>
         ) : null}
       </div>
+      {/* Remove deletes the sandbox and its snapshots outright, so it carries
+          the destructive treatment; stopping is reversible and does not. */}
       <Button
-        variant="outline"
+        variant={isOff ? "destructive" : "outline"}
         size="sm"
         onClick={isOff ? onRemove : onStop}
         disabled={busy}
