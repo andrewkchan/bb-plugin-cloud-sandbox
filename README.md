@@ -84,7 +84,12 @@ receive it. Other agent providers are not supported yet.
 ## Images
 
 An image bakes bb's prerequisites plus your own setup, so a machine created
-from it starts without repeating that work. Each image has a name, a block of
+from it starts without repeating that work. **Create image** starts from a
+preset — Blank, Claude Code, or
+[pi.dev](https://pi.dev/docs/latest/providers#environment-variables-or-auth-file),
+which installs the pi coding agent and seeds its provider API-key variable
+names. A preset only seeds a new image's name, commands and variables; it is
+ordinary editable configuration afterwards, not a link that keeps updating. Each image has a name, a block of
 custom commands, and build-time environment variables; building publishes it
 to the container registry and the image becomes `Ready`.
 
@@ -97,7 +102,11 @@ machine.
 
 Build-time env vars are baked into the image and visible to anyone who can
 pull it. Agent credentials are deliberately not among them — those are
-injected per machine from the Agents tab.
+injected per machine from the Agents tab. A variable left **blank** is a
+checklist entry and is not written into the image at all: emitting `ENV KEY=""`
+would bake an empty string that shadows whatever the machine is given at
+runtime. That is what lets the pi.dev preset ship a list of provider key names
+without changing any image it builds.
 
 Images and their build logs live in the plugin's SQLite database rather than
 `bb.storage.kv`, because a build log routinely exceeds the 256KB kv value cap.

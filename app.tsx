@@ -998,8 +998,9 @@ function ImageDetail({
         <label className="text-xs font-medium">Environment variables</label>
         <p className="text-xs text-muted-foreground">
           Baked into the image, so they are visible to anyone who can pull it.
-          Keep secrets out; agent credentials are injected per machine from the
-          Agents tab.
+          Keep secrets out where you can; agent credentials for Claude Code are
+          injected per machine from the Agents tab instead. A row left blank is
+          only a reminder and is not written into the image.
         </p>
         {env.map((entry, index) => (
           <div key={index} className="flex items-center gap-2">
@@ -1131,6 +1132,9 @@ function ImagesTab() {
   const rpc = useRpc<typeof rpcContract>();
   const [images, setImages] = useState<PluginImage[] | null>(null);
   const [registryUrl, setRegistryUrl] = useState<string | null>(null);
+  const [presets, setPresets] = useState<
+    { id: string; label: string; description: string }[]
+  >([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -1142,11 +1146,19 @@ function ImagesTab() {
     rpc.call("images_list").then((r) => {
       setImages(r.images);
       setRegistryUrl(r.registryUrl);
+      setPresets(r.presets);
     }, report);
   }, [rpc, report]);
 
   useEffect(refetch, [refetch]);
   useRealtime("images-changed", refetch);
+
+  const createFrom = (presetId: string) => {
+    rpc.call("images_create", { presetId }).then((image) => {
+      refetch();
+      setOpenId(image.id);
+    }, report);
+  };
 
   const open = images?.find((image) => image.id === openId) ?? null;
   if (open !== null) {
@@ -1165,19 +1177,43 @@ function ImagesTab() {
 
   return (
     <div className="space-y-3 text-sm">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center">
         <Button
           size="sm"
-          onClick={() =>
-            rpc.call("images_create").then((image) => {
-              refetch();
-              setOpenId(image.id);
-            }, report)
-          }
+          className="rounded-r-none"
+          onClick={() => createFrom("blank")}
         >
           <Icon name="Plus" className="mr-1.5 size-4" aria-hidden />
           Create image
         </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              size="sm"
+              className="rounded-l-none border-l border-background/30 px-2"
+              aria-label="Create image from a preset"
+            >
+              {"\u25be"}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            {/* Each entry creates immediately: this is an action menu, unlike
+                the machine page's image picker, which only changes a choice. */}
+            {presets.map((preset) => (
+              <DropdownMenuItem
+                key={preset.id}
+                onSelect={() => createFrom(preset.id)}
+              >
+                <span className="flex flex-col">
+                  <span>{preset.label}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {preset.description}
+                  </span>
+                </span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {error !== null ? <p className="text-destructive">{error}</p> : null}

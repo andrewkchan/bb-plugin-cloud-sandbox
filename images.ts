@@ -27,6 +27,81 @@ export const DEFAULT_REPOSITORY = "bb-cloud-machine";
  */
 export const BASE_IMAGE = "docker.io/library/ubuntu:26.04";
 
+/**
+ * Starting points offered when creating an image.
+ *
+ * A preset only seeds the name, commands and environment variables of a new
+ * image; it is ordinary editable configuration afterwards, not a link that
+ * keeps updating.
+ */
+export interface ImagePreset {
+  id: string;
+  label: string;
+  description: string;
+  name: string;
+  commands: string;
+  /** Seeded with empty values: names act as a checklist to fill in. */
+  env: ImageEnvVar[];
+}
+
+/**
+ * pi.dev reads a provider's key from the matching environment variable.
+ * These are the API-key providers from its docs; the list is a starting
+ * point, and unused rows can be deleted.
+ *
+ * @see https://pi.dev/docs/latest/providers#environment-variables-or-auth-file
+ */
+const PI_PROVIDER_KEYS = [
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "GEMINI_API_KEY",
+  "OPENROUTER_API_KEY",
+  "GROQ_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "MISTRAL_API_KEY",
+  "TOGETHER_API_KEY",
+  "CEREBRAS_API_KEY",
+  "FIREWORKS_API_KEY",
+  "BASETEN_API_KEY",
+  "NVIDIA_API_KEY",
+  "KIMI_API_KEY",
+  "MINIMAX_API_KEY",
+  "AZURE_OPENAI_API_KEY",
+  "AI_GATEWAY_API_KEY",
+];
+
+export const IMAGE_PRESETS: ImagePreset[] = [
+  {
+    id: "blank",
+    label: "Blank",
+    description: "bb's prerequisites only.",
+    name: "Image",
+    commands: "",
+    env: [],
+  },
+  {
+    id: "claude-code",
+    label: "Claude Code",
+    description: "Installs the Claude Code CLI.",
+    name: "Claude Code",
+    commands: "npm install -g @anthropic-ai/claude-code",
+    env: [],
+  },
+  {
+    id: "pi",
+    label: "pi.dev",
+    description: "Installs the pi coding agent and lists provider API keys.",
+    name: "pi.dev",
+    // --ignore-scripts is what pi's own install instructions use.
+    commands: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
+    env: PI_PROVIDER_KEYS.map((key) => ({ key, value: "" })),
+  },
+];
+
+export function findPreset(id: string): ImagePreset | null {
+  return IMAGE_PRESETS.find((preset) => preset.id === id) ?? null;
+}
+
 /** A build-time environment variable baked into the image. */
 export interface ImageEnvVar {
   key: string;
@@ -62,7 +137,8 @@ export interface BuildImageResult {
 
 /** Reject anything that could break out of the Dockerfile's ENV lines. */
 function assertSafeEnv(env: ImageEnvVar[]): void {
-  for (const { key } of env) {
+  for (const { key, value } of env) {
+    if (value === "") continue;
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
       throw new Error(
         `Invalid environment variable name "${key}". Use letters, digits and underscores, not starting with a digit.`,
@@ -96,6 +172,10 @@ export function buildDockerfile(commands: string, env: ImageEnvVar[]): string {
       "rm -rf /var/lib/apt/lists/*",
   ];
   for (const { key, value } of env) {
+    // A row left blank is a checklist entry, not a variable. Emitting
+    // ENV KEY="" would bake an empty string that shadows whatever the machine
+    // is given at runtime.
+    if (value === "") continue;
     // JSON.stringify gives correctly escaped Dockerfile quoting.
     lines.push(`ENV ${key}=${JSON.stringify(value)}`);
   }

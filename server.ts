@@ -32,6 +32,8 @@ import {
   buildImage,
   DEFAULT_REPOSITORY,
   deleteImagesForTag,
+  findPreset,
+  IMAGE_PRESETS,
   pruneUntaggedImages,
   type ImageEnvVar,
   type RegistryCleanupResult,
@@ -247,9 +249,20 @@ export const rpcContract = defineRpcContract({
       images: z.array(imageSchema),
       /** The repository's images on vercel.com, when derivable. */
       registryUrl: z.string().nullable(),
+      /** Starting points offered by the Create image button. */
+      presets: z.array(
+        z.object({
+          id: z.string(),
+          label: z.string(),
+          description: z.string(),
+        }),
+      ),
     }),
   },
-  images_create: { input: z.null(), output: imageSchema },
+  images_create: {
+    input: z.object({ presetId: z.string() }),
+    output: imageSchema,
+  },
   images_update: {
     input: z.object({
       id: z.string(),
@@ -1314,22 +1327,38 @@ export default async function plugin(bb: BbPluginApi) {
       const session = await readStoredSession();
       return {
         images: listImages(),
+        presets: IMAGE_PRESETS.map(({ id, label, description }) => ({
+          id,
+          label,
+          description,
+        })),
         registryUrl:
           session === null
             ? null
             : vercelProjectUrl(session, `images/${DEFAULT_REPOSITORY}`),
       };
     },
-    images_create: () => {
+    images_create: ({ presetId }) => {
+      const preset = findPreset(presetId);
+      if (preset === null) throw new Error(`No image preset "${presetId}"`);
       const now = Date.now();
       const id = randomUUID().slice(0, 8);
       const count = (
         db.prepare("SELECT COUNT(*) AS n FROM images").get() as { n: number }
       ).n;
+      // A preset only seeds the row; it is ordinary editable configuration
+      // from here, not a link that keeps updating.
       db.prepare(
         `INSERT INTO images (id, name, commands, env, status, created_at, updated_at)
-         VALUES (?, ?, '', '[]', 'pending', ?, ?)`,
-      ).run(id, `Image ${count + 1}`, now, now);
+         VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+      ).run(
+        id,
+        count === 0 ? preset.name : `${preset.name} ${count + 1}`,
+        preset.commands,
+        JSON.stringify(preset.env),
+        now,
+        now,
+      );
       bb.realtime.publish(IMAGES_CHANGED, {});
       const created = getImage(id);
       if (created === null) throw new Error("Image was not created.");
