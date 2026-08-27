@@ -48,9 +48,10 @@ function MachineRow({
   return (
     <li className="flex items-center gap-3 rounded-lg border border-border p-3">
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">
-          {machine.hostName ?? machine.name}
-        </p>
+        {/* The sandbox name is the one identifier this plugin owns. bb's host
+            name is the container's hostname, which a resumed sandbox may not
+            keep, so it is not the title. */}
+        <p className="truncate text-sm font-medium">{machine.name}</p>
         <p
           className={cn(
             "mt-0.5 flex items-center gap-1.5 text-xs",
@@ -60,9 +61,10 @@ function MachineRow({
           {machine.state === "connecting" ? <Spinner /> : null}
           {machine.status}
         </p>
-        {machine.hostName !== null ? (
+        {machine.hostId !== null ? (
           <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-            {machine.name}
+            {machine.hostId}
+            {machine.hostName === null ? null : ` · ${machine.hostName}`}
           </p>
         ) : null}
       </div>

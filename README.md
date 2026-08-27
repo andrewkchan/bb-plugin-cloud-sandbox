@@ -121,6 +121,15 @@ building native modules, so a new machine sits at `Connecting` for a while.
   not `connected` is still `Connecting`.
 - There is no push event for a machine ending, so a disconnect is recorded
   when a refresh first observes it.
+- A disconnect keeps both the local record and the bb host. The daemon's
+  durable `hostId`/`hostKey` live in the sandbox filesystem
+  (`~/.bb-machines/<server>/auth.json`), so deleting the bb host would
+  invalidate them. A `disconnected` host is the correct state for a machine
+  that is off but could come back — the same state bb shows for a sleeping
+  laptop. Only an explicit **Remove** deletes the host and the record.
+- A row is titled by its **sandbox name**, with the bb host id as a subtitle.
+  The sandbox name is the one identifier this plugin owns; bb's host *name*
+  is the container's hostname, which a resumed sandbox may not keep.
 - The page polls every 45s while it is open, and the interval is cleared on
   unmount. Overlapping refreshes are suppressed so a slow list cannot stack
   up behind the timer.

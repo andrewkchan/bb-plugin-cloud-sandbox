@@ -82,6 +82,8 @@ const machineRecordSchema = z.object({
   /** bb host id this sandbox enrolled as. */
   hostId: z.string(),
   createdAt: z.number(),
+  /** Epoch ms the machine was first observed to be no longer running. */
+  disconnectedAt: z.number().nullable(),
 });
 type MachineRecord = z.infer<typeof machineRecordSchema>;
 
@@ -467,23 +469,37 @@ export default async function plugin(bb: BbPluginApi) {
     for (const view of views) {
       if (view.state !== "inactive" && view.state !== "error") continue;
       if (!recordByName.has(view.name)) continue;
-      await record_disconnect(view);
+      await noteDisconnect(view);
     }
 
     return { machines: views, signedIn: true, creating: creating.size > 0 };
   }
 
-  /** Log a machine's first observed disconnect, then forget it. */
-  async function record_disconnect(view: MachineView): Promise<void> {
+  /**
+   * Note a machine's first observed disconnect. The record is deliberately
+   * KEPT: it is how the row holds on to its bb host id, how Remove finds the
+   * host to delete, and — once waking a machine exists — how a resumed
+   * sandbox is recognised as the same machine.
+   *
+   * The bb host is deliberately NOT deleted either. The daemon's durable
+   * hostId/hostKey live in the sandbox filesystem, so removing the host here
+   * would invalidate them; a `disconnected` host is the correct state for a
+   * machine that is off but can come back, exactly like a sleeping laptop.
+   */
+  async function noteDisconnect(view: MachineView): Promise<void> {
     const records = await readRecords();
-    const remaining = records.filter((r) => r.name !== view.name);
-    if (remaining.length === records.length) return;
+    const target = records.find((r) => r.name === view.name) ?? null;
+    if (target === null || target.disconnectedAt !== null) return;
     await record(
       "machine.disconnected",
       view.name,
       `Machine is no longer running (${view.status}).`,
     );
-    await writeRecords(remaining);
+    await writeRecords(
+      records.map((r) =>
+        r.name === view.name ? { ...r, disconnectedAt: Date.now() } : r,
+      ),
+    );
   }
 
   async function startCreate(): Promise<boolean> {
@@ -515,6 +531,7 @@ export default async function plugin(bb: BbPluginApi) {
                 name,
                 hostId: enrollment.hostId,
                 createdAt: Date.now(),
+                disconnectedAt: null,
               },
               ...(await readRecords()),
             ]);
