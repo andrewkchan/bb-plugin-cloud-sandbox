@@ -45,6 +45,11 @@ const storedSessionSchema = z.object({
 });
 type StoredSession = z.infer<typeof storedSessionSchema>;
 
+/** What the Agents tab shows. The token value itself is never sent. */
+const agentsStatusSchema = z.object({
+  claudeCodeTokenSet: z.boolean(),
+});
+
 const authStatusSchema = z.object({
   state: z.enum(["signed-out", "pending", "signed-in"]),
   verificationUriComplete: z.string().nullable(),
@@ -123,6 +128,11 @@ export type MachineView = z.infer<typeof machineViewSchema>;
 
 export const rpcContract = defineRpcContract({
   auth_status: { input: z.null(), output: authStatusSchema },
+  agents_status: { input: z.null(), output: agentsStatusSchema },
+  agents_set_claude_token: {
+    input: z.object({ token: z.string() }),
+    output: agentsStatusSchema,
+  },
   auth_start: { input: z.null(), output: authStatusSchema },
   auth_cancel: { input: z.null(), output: authStatusSchema },
   auth_sign_out: { input: z.null(), output: authStatusSchema },
@@ -186,6 +196,14 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Machine lifetime (seconds; max 2700 on Hobby, 86400 on Pro)",
       default: "2700",
+    },
+    // Claude Code accepts a long-lived OAuth token from `claude setup-token`.
+    // It is injected into the machine's environment at creation, not baked
+    // into an image, so it never lands in a shared image layer.
+    claudeCodeOauthToken: {
+      type: "string",
+      label: "Claude Code OAuth token",
+      secret: true,
     },
     machineVcpus: {
       type: "select",
@@ -612,6 +630,19 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
+  /**
+   * Agent credentials handed to a machine at creation.
+   *
+   * These are deliberately environment variables on the sandbox rather than
+   * anything baked into an image: an image is a shared artifact, and a
+   * long-lived token must not end up in one of its layers.
+   */
+  async function agentEnv(): Promise<Record<string, string>> {
+    const { claudeCodeOauthToken } = await settings.get();
+    const token = (claudeCodeOauthToken ?? "").trim();
+    return token === "" ? {} : { CLAUDE_CODE_OAUTH_TOKEN: token };
+  }
+
   async function startCreate(): Promise<boolean> {
     const credentials = await requireCredentials();
     const values = await settings.get();
@@ -631,6 +662,7 @@ export default async function plugin(bb: BbPluginApi) {
         const result = await createMachine({
           credentials,
           enrollment,
+          env: await agentEnv(),
           timeoutMs,
           vcpus: Number.isFinite(vcpus) ? vcpus : 2,
           onCreated: async (name) => {
@@ -781,6 +813,19 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     auth_status: () => describeAuth(),
+    agents_status: async () => {
+      const { claudeCodeOauthToken } = await settings.get();
+      return { claudeCodeTokenSet: (claudeCodeOauthToken ?? "").trim() !== "" };
+    },
+    agents_set_claude_token: async ({ token }) => {
+      // Written through the settings route so it lands in the plugin's 0600
+      // secrets directory rather than bb.db. An empty string clears it.
+      await bb.sdk.plugins.updateSettings({
+        pluginId: bb.pluginId,
+        values: { claudeCodeOauthToken: token.trim() },
+      });
+      return { claudeCodeTokenSet: token.trim() !== "" };
+    },
     auth_start: () => startSignIn(),
     auth_cancel: async () => {
       pending?.controller.abort();

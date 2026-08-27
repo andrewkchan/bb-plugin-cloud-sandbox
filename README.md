@@ -10,7 +10,8 @@ can run threads. The interface is entirely graphical.
   Each row has a menu to wake, stop or delete it; plus create, manual refresh,
   links to bb's own machine settings and to the project's sandboxes on
   vercel.com, and a collapsible debug log.
-- **Settings → Vercel account** — one **Sign in with Vercel** button.
+- **Settings** — three tabs: **Images** (custom machine images), **Agents**
+  (agent credentials) and **Configuration** (the Vercel account).
 
 ## Setup
 
@@ -34,6 +35,7 @@ Everything is optional and lives in the plugin's settings page.
 | --- | --- | --- |
 | `machineTimeoutSeconds` | `2700` | How long a machine lives before Vercel terminates it |
 | `machineVcpus` | `2` | vCPUs per machine (2 GB memory each) |
+| `claudeCodeOauthToken` | — | Managed by the Agents tab; injected as `CLAUDE_CODE_OAUTH_TOKEN` |
 | `vercelSession` | — | Managed by the sign-in flow; do not edit by hand |
 
 Vercel caps sandbox lifetime at **45 minutes on Hobby** and 24 hours on
@@ -62,6 +64,40 @@ bb plugin logs cloud-sandbox -f
 | `auth.ts` | Vercel OAuth device authorization (RFC 8628). No bb dependency. |
 | `server.ts` | Settings, RPC, sign-in orchestration, machine state, debug log. |
 | `app.tsx` | The Cloud Machines page and the Vercel account settings section. |
+
+## Agent credentials
+
+The Agents tab stores a long-lived Claude Code OAuth token, obtained by
+running `claude setup-token`. It is injected into each machine's environment
+as `CLAUDE_CODE_OAUTH_TOKEN` **when the machine is created**, deliberately not
+baked into an image: an image is a shared artifact and a long-lived token must
+not end up in one of its layers. Machines created before a token is set do not
+receive it. Other agent providers are not supported yet.
+
+## Building custom images
+
+Vercel Sandbox boots from OCI images in
+[Vercel Container Registry](https://vercel.com/docs/sandbox/concepts/images).
+Neither the SDK nor this plugin's host can build one directly — `vercel vcr
+build`/`push` shell out to docker, podman or buildah — so images are built
+**inside a throwaway sandbox**. That pipeline is verified end to end; three
+things about it are not obvious:
+
+1. **`buildah bud --isolation chroot` is required.** The default isolation
+   tries to create a container namespace and fails inside a microVM with
+   ``mount `proc` to `proc`: Operation not permitted``. `FROM`/`COPY` work
+   without it, but no `RUN` step does.
+2. **`vercel/sandbox/ubuntu` is not pullable.** It is a Vercel-internal
+   shorthand for `Sandbox.create({ image })`, and
+   `vcr.vercel.com/vercel/sandbox/ubuntu` returns 404. Custom images use a
+   stock base such as `docker.io/library/ubuntu:26.04`, which matches what the
+   managed image runs.
+3. **The image is only a filesystem.** Vercel Sandbox does not run a Docker
+   `ENTRYPOINT` or `CMD`, so there is no init contract to satisfy.
+
+The registry is `vcr.vercel.com`, images live at
+`<teamSlug>/<projectId>/<repo>:<tag>`, and `vercel vcr login buildah`
+authenticates with the plugin's own OAuth token.
 
 ## How enrolment works
 

@@ -84,6 +84,12 @@ export function buildEnrollmentScript(details: EnrollmentDetails): string {
 export async function createMachine(options: {
   credentials: SandboxCredentials;
   enrollment: EnrollmentDetails;
+  /**
+   * Environment variables for the machine, inherited by every command run on
+   * it. Agent credentials arrive this way rather than through an image, so a
+   * long-lived token never lands in a shared image layer.
+   */
+  env?: Record<string, string>;
   /** Sandbox lifetime; Vercel caps this at 45m on Hobby, 24h on Pro. */
   timeoutMs: number;
   vcpus?: number;
@@ -91,13 +97,14 @@ export async function createMachine(options: {
   /** Called once the sandbox exists, before the slow enrollment starts. */
   onCreated?: (name: string) => void | Promise<void>;
 }): Promise<{ name: string; enrollLog: string }> {
-  const { credentials, enrollment, timeoutMs, vcpus, signal, onCreated } =
+  const { credentials, enrollment, env, timeoutMs, vcpus, signal, onCreated } =
     options;
 
   const sandbox = await Sandbox.create({
     ...credentials,
     name: `${MACHINE_NAME_PREFIX}${randomUUID().slice(0, 8)}`,
     timeout: timeoutMs,
+    ...(env === undefined || Object.keys(env).length === 0 ? {} : { env }),
     ...(vcpus === undefined ? {} : { resources: { vcpus } }),
     ...(signal === undefined ? {} : { signal }),
   });

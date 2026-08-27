@@ -28,6 +28,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Icon } from "@/components/ui/icon";
+import { Input } from "@/components/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table,
   TableBody,
@@ -634,6 +636,101 @@ function MachinesPage() {
   );
 }
 
+/**
+ * Agent credentials. Only Claude Code is supported for now.
+ *
+ * The token is write-only from the UI's point of view: the backend reports
+ * whether one is set but never sends the value back, because a secret setting
+ * is deliberately excluded from the frontend's settings snapshot.
+ */
+function AgentsTab() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [tokenSet, setTokenSet] = useState<boolean | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const report = useCallback((cause: unknown) => {
+    setBusy(false);
+    setError(cause instanceof Error ? cause.message : String(cause));
+  }, []);
+
+  useEffect(() => {
+    rpc.call("agents_status").then((r) => setTokenSet(r.claudeCodeTokenSet), report);
+  }, [rpc, report]);
+
+  const save = (value: string) => {
+    setBusy(true);
+    setError(null);
+    rpc.call("agents_set_claude_token", { token: value }).then((r) => {
+      setBusy(false);
+      setTokenSet(r.claudeCodeTokenSet);
+      setDraft("");
+    }, report);
+  };
+
+  return (
+    <div className="space-y-4 text-sm">
+      <div className="space-y-2">
+        <p className="font-medium">Claude Code</p>
+        <p className="text-muted-foreground">
+          Run{" "}
+          <code className="font-mono">claude setup-token</code> on your own
+          machine to obtain a long-lived OAuth token, then paste it here. It is
+          injected into each cloud machine&apos;s environment as{" "}
+          <code className="font-mono">CLAUDE_CODE_OAUTH_TOKEN</code> when the
+          machine is created — not baked into an image, so it never lands in a
+          shared image layer.
+        </p>
+        {tokenSet === null ? (
+          <p className="text-muted-foreground">Loading…</p>
+        ) : (
+          <p className="text-muted-foreground">
+            Status:{" "}
+            <span className="font-medium text-foreground">
+              {tokenSet ? "A token is set" : "No token set"}
+            </span>
+          </p>
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            type="password"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            placeholder={tokenSet ? "Replace the stored token" : "Paste the token"}
+            className="max-w-sm font-mono"
+            autoComplete="off"
+            aria-label="Claude Code OAuth token"
+          />
+          <Button
+            size="sm"
+            onClick={() => save(draft)}
+            disabled={busy || draft.trim() === ""}
+          >
+            {busy ? "Saving…" : "Save token"}
+          </Button>
+          {tokenSet ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => save("")}
+              disabled={busy}
+            >
+              Clear
+            </Button>
+          ) : null}
+        </div>
+        {error !== null ? <p className="text-destructive">{error}</p> : null}
+      </div>
+
+      <p className="text-xs text-muted-foreground">
+        Other agent providers are not supported yet. Machines created before a
+        token is set do not receive it; recreate them to pick it up.
+      </p>
+    </div>
+  );
+}
+
 /** The "Sign in with Vercel" flow, rendered on the plugin's settings page. */
 function VercelAuthSection() {
   const rpc = useRpc<typeof rpcContract>();
@@ -744,13 +841,34 @@ function VercelAuthSection() {
   );
 }
 
+/** Images, Agents and Configuration, per the plugin's settings page. */
+function CloudSandboxSettings() {
+  return (
+    <Tabs defaultValue="images">
+      <TabsList>
+        <TabsTrigger value="images">Images</TabsTrigger>
+        <TabsTrigger value="agents">Agents</TabsTrigger>
+        <TabsTrigger value="configuration">Configuration</TabsTrigger>
+      </TabsList>
+      <TabsContent value="images" className="pt-4">
+        <p className="text-sm text-muted-foreground">
+          Custom machine images are not built yet.
+        </p>
+      </TabsContent>
+      <TabsContent value="agents" className="pt-4">
+        <AgentsTab />
+      </TabsContent>
+      <TabsContent value="configuration" className="pt-4">
+        <VercelAuthSection />
+      </TabsContent>
+    </Tabs>
+  );
+}
+
 export default definePluginApp((app) => {
   app.slots.settingsSection({
-    id: "vercel-auth",
-    title: "Vercel account",
-    description:
-      "Cloud machines run on Vercel. Sign in once; the session refreshes itself.",
-    component: VercelAuthSection,
+    id: "cloud-sandbox-settings",
+    component: CloudSandboxSettings,
   });
   app.slots.navPanel({
     id: "cloud-machines",
