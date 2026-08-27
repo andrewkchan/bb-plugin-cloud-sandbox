@@ -20,6 +20,12 @@ existing install.
 - **Settings** — two tabs: **Templates** (what a machine is made of) and
   **Authentication** (the Vercel account).
 
+![The Cloud Machines page, listing machines with their status, template, and session uptime](docs/cloud-machines.png)
+
+Create a machine from the template named on the button, or pick another from
+the chevron. Each row shows which template it came from, how long its current
+session has been up, and links to bb's own page for that machine.
+
 ## Setup
 
 ```sh
@@ -42,7 +48,7 @@ Everything is optional and lives in the plugin's settings page.
 | --- | --- | --- |
 | `machineTimeoutSeconds` | `2700` | How long a machine lives before Vercel terminates it |
 | `machineVcpus` | `2` | vCPUs per machine (2 GB memory each) |
-| `claudeCodeOauthToken` | — | Managed by the Agents tab; injected as `CLAUDE_CODE_OAUTH_TOKEN` |
+| `templateSecrets` | — | Managed by each template's agent credentials; do not edit by hand |
 | `vercelSession` | — | Managed by the sign-in flow; do not edit by hand |
 
 Vercel caps sandbox lifetime at **45 minutes on Hobby** and 24 hours on
@@ -96,17 +102,19 @@ before a credential is set do not receive it.
 
 ## Templates
 
+![The Templates tab, with one template building and one ready to use](docs/templates.png)
+
 A template is what a cloud machine is made of: an image, plus the credentials
 its machines are given. The image bakes bb's prerequisites and your own setup
 so a machine starts without repeating that work; the credentials are injected
-when the machine is created and never enter a layer. **Create image** starts from a
-preset — Blank, Claude Code, or
-[pi.dev](https://pi.dev/docs/latest/providers#environment-variables-or-auth-file),
-which installs the pi coding agent and seeds its provider API-key variable
-names. A preset only seeds a new image's name, commands and variables; it is
-ordinary editable configuration afterwards, not a link that keeps updating. Each image has a name, a block of
-custom commands, and build-time environment variables; building publishes it
-to the container registry and the image becomes `Ready`.
+when the machine is created and never enter a layer.
+
+**Create template** starts from a preset — Blank, Claude Code, or
+[pi.dev](https://pi.dev). A preset only seeds a new template's name, commands
+and variables; it is ordinary editable configuration afterwards, not a link
+that keeps updating. Each template has a name, a block of custom commands, and
+build-time environment variables; building publishes its image to the container
+registry and the template becomes `Ready`.
 
 Every image starts from `docker.io/library/ubuntu:26.04` and installs bb's
 prerequisites first: Node (the host daemon needs 22.19+ and the stock base
@@ -116,29 +124,30 @@ commands so those commands can use them, and they persist into the running
 machine.
 
 Build-time env vars are baked into the image and visible to anyone who can
-pull it. Agent credentials are deliberately not among them — those are
-injected per machine from the Agents tab. A variable left **blank** is a
-checklist entry and is not written into the image at all: emitting `ENV KEY=""`
-would bake an empty string that shadows whatever the machine is given at
-runtime. That is what lets the pi.dev preset ship a list of provider key names
-without changing any image it builds.
+pull it, so credentials do not belong among them — those are a template's
+agent credentials, injected per machine instead. A variable left **blank** is
+a checklist entry and is not written into the image at all: emitting
+`ENV KEY=""` would bake an empty string that shadows whatever the machine is
+given at runtime.
 
-Images and their build logs live in the plugin's SQLite database rather than
-`bb.storage.kv`, because a build log routinely exceeds the 256KB kv value cap.
+Templates and their build logs live in the plugin's SQLite database rather
+than `bb.storage.kv`, because a build log routinely exceeds the 256KB kv value
+cap.
 
-**Creating a machine** uses the image most recently used, changeable from the
-chevron beside the button; the dropdown also offers "No image" for Vercel's
-default managed image, and is available whether or not any image exists. The
-chevron is a picker, not an action menu — choosing an entry only changes what
-the button will do, and nothing is created until the button is pressed. The
-selection follows the server's default until the user picks one, so a
-background refresh cannot silently change what the button would create.
+**Creating a machine** uses the template most recently used, changeable from
+the chevron beside the button; the dropdown also offers "No template" for
+Vercel's default managed image, and is available whether or not any template
+exists. The chevron is a picker, not an action menu — choosing an entry only
+changes what the button will do, and nothing is created until the button is
+pressed. The selection follows the server's default until the user picks one,
+so a background refresh cannot silently change what the button would create.
 
-Deleting an image removes it and its build history from bb **and deletes its
-manifest from the container registry**. Only the latest hash of each image is
-kept: pushing a tag that already exists leaves the manifest it replaced behind,
-untagged and at full size, so every successful build prunes untagged manifests
-afterwards. One development rebuild had already stranded 470MB this way.
+Deleting a template removes it, its build history and its credentials from bb
+**and deletes its image from the container registry**. Only the latest hash of
+each template's image is kept: pushing a tag that already exists leaves the
+manifest it replaced behind, untagged and at full size, so every successful
+build prunes untagged manifests afterwards. One development rebuild had
+already stranded 470MB this way.
 
 Registry cleanup goes through `api.vercel.com/v1/vcr/...` rather than the
 `vercel vcr` CLI, so it needs no container tooling. Two things about that API
@@ -147,14 +156,12 @@ the sandboxes API accepts, so the plugin resolves the `prj_` id via
 `/v9/projects/<slug>` and caches it; and deletion addresses an image id, not a
 tag, so the repository is listed to find the manifest a tag points at. Every
 cleanup failure is recorded in the debug log rather than failing the build or
-deletion that triggered it. Until an image has been built the button is replaced by
-**Setup images**, which links to `#images` on this plugin's settings page —
-without one, a machine would install bb's prerequisites from scratch.
+deletion that triggered it.
 
-Baking those prerequisites cuts enrolment from about **49s to 29s** measured
-between the `create.sandbox-ready` and `create.enrolled` debug events, so an
-image is a modest speedup rather than a prerequisite — machines can be created
-without one.
+Baking bb's prerequisites cuts enrolment from about **49s to 29s** measured
+between the `create.sandbox-ready` and `create.enrolled` debug events, so a
+template is a modest speedup rather than a prerequisite — machines can be
+created without one.
 
 The rest of the time cannot be baked away. Enrolment downloads a 37MB
 `bb-app.tgz` from the bb server (~24s over a connect tunnel) and installs it
@@ -223,9 +230,9 @@ building native modules, so a new machine sits at `Connecting` for a while.
   plugin relies on rather than saving anything; waking needs only the most
   recent snapshot. Snapshot storage grows with the *number* of machines, not
   with how often one is stopped, so deleting machines is what reclaims it.
-- An image can create machines whenever it has ever built successfully, which
-  is tracked by `imageRef` rather than by status. A failed rebuild leaves the
-  published manifest untouched, so it must not strand a working image.
+- A template can create machines whenever it has ever built successfully,
+  which is tracked by `imageRef` rather than by status. A failed rebuild leaves
+  the published image untouched, so it must not strand a working template.
 - Every run boots a fresh sandbox and stops it in a `finally` — a leaked
   sandbox keeps billing until its own timeout fires.
 - `auth.ts` implements the device grant directly rather than calling
