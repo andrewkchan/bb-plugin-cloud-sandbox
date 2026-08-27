@@ -15,7 +15,7 @@ import type {
   DebugEvent,
   MachineView,
   PluginBuild,
-  PluginImage,
+  PluginTemplate,
   rpcContract,
 } from "./server";
 import { Button } from "@/components/ui/button";
@@ -538,7 +538,7 @@ function MachinesPage() {
                   size="sm"
                   className="rounded-l-none border-l border-background/30 px-2"
                   disabled={creating || !signedIn}
-                  aria-label={`Change image, currently ${selectedImageName}`}
+                  aria-label={`Change template, currently ${selectedImageName}`}
                 >
                   {"\u25be"}
                 </Button>
@@ -560,15 +560,15 @@ function MachinesPage() {
                   ))}
                   {readyImages.length === 0 ? null : <DropdownMenuSeparator />}
                   <DropdownMenuRadioItem value="">
-                    No image (Vercel default)
+                    No template (Vercel default)
                   </DropdownMenuRadioItem>
                 </DropdownMenuRadioGroup>
                 <DropdownMenuSeparator />
                 {/* Sits outside the radio group: this navigates away rather
                     than changing the selection, and the icon says so. */}
                 <DropdownMenuItem asChild>
-                  <UrlLink href={SETTINGS_IMAGES_HREF}>
-                    Configure images
+                  <UrlLink href={SETTINGS_TEMPLATES_HREF}>
+                    Configure templates
                     <Icon
                       name="ExternalLink"
                       className="ml-auto size-3.5 opacity-60"
@@ -709,7 +709,7 @@ function MachinesPage() {
                     onSort={toggleSort}
                   />
                   <TableHead>Status</TableHead>
-                  <TableHead>Image</TableHead>
+                  <TableHead>Template</TableHead>
                   <SortableHead
                     label="Created"
                     column="createdAt"
@@ -809,32 +809,32 @@ function MachinesPage() {
 
 
 /** Ready is the expected state and carries no dot; the rest need attention. */
-const IMAGE_STATUS_STYLES: Record<
-  Exclude<PluginImage["status"], "ready" | "building">,
+const TEMPLATE_STATUS_STYLES: Record<
+  Exclude<PluginTemplate["status"], "ready" | "building">,
   string
 > = {
   pending: "bg-muted-foreground/40",
   error: "bg-destructive",
 };
 
-const IMAGE_STATUS_LABELS: Record<PluginImage["status"], string> = {
+const TEMPLATE_STATUS_LABELS: Record<PluginTemplate["status"], string> = {
   ready: "Ready",
   building: "Building",
   pending: "Pending",
   error: "Error",
 };
 
-function ImageStatus({ status }: { status: PluginImage["status"] }) {
+function TemplateStatus({ status }: { status: PluginTemplate["status"] }) {
   return (
     <span className="flex items-center gap-2 text-xs text-muted-foreground">
       {status === "building" ? <Spinner className="size-3" /> : null}
       {status === "pending" || status === "error" ? (
         <span
           aria-hidden
-          className={cn("size-2 shrink-0 rounded-full", IMAGE_STATUS_STYLES[status])}
+          className={cn("size-2 shrink-0 rounded-full", TEMPLATE_STATUS_STYLES[status])}
         />
       ) : null}
-      {IMAGE_STATUS_LABELS[status]}
+      {TEMPLATE_STATUS_LABELS[status]}
     </span>
   );
 }
@@ -863,7 +863,7 @@ function BuildLog({ build, onBack }: { build: PluginBuild; onBack: () => void })
         Back to builds
       </Button>
       <p className="text-xs text-muted-foreground">
-        Build {build.id} · {IMAGE_STATUS_LABELS[build.status === "ready" ? "ready" : build.status === "error" ? "error" : "building"]}
+        Build {build.id} · {TEMPLATE_STATUS_LABELS[build.status === "ready" ? "ready" : build.status === "error" ? "error" : "building"]}
         {build.error === null ? null : ` · ${build.error}`}
       </p>
       <pre className="max-h-[28rem] overflow-auto rounded-md border border-border bg-card p-2 font-mono text-xs whitespace-pre-wrap">
@@ -873,22 +873,114 @@ function BuildLog({ build, onBack }: { build: PluginBuild; onBack: () => void })
   );
 }
 
-/** An image's configuration, its Build button, and its build history. */
-function ImageDetail({
-  image,
+/**
+ * Credentials a template injects when a machine is created.
+ *
+ * Deliberately separate from the build-time variables above: those are baked
+ * into the image and readable by anyone who can pull it, while these never
+ * enter a layer. Write-only from here — the backend reports which keys are
+ * set and never returns a value.
+ */
+function TemplateSecrets({ templateId }: { templateId: string }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [keys, setKeys] = useState<string[] | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const report = useCallback((cause: unknown) => {
+    setBusy(false);
+    setError(cause instanceof Error ? cause.message : String(cause));
+  }, []);
+
+  useEffect(() => {
+    rpc
+      .call("templates_secret_keys", { templateId })
+      .then((r) => setKeys(r.keys), report);
+  }, [rpc, templateId, report]);
+
+  const save = (value: string) => {
+    setBusy(true);
+    setError(null);
+    rpc
+      .call("templates_set_secret", {
+        templateId,
+        key: "CLAUDE_CODE_OAUTH_TOKEN",
+        value,
+      })
+      .then((r) => {
+        setBusy(false);
+        setKeys(r.keys);
+        setDraft("");
+      }, report);
+  };
+
+  const tokenSet = keys?.includes("CLAUDE_CODE_OAUTH_TOKEN") ?? false;
+
+  return (
+    <div className="space-y-1.5">
+      <label className="text-xs font-medium">Agent credentials</label>
+      <p className="text-xs text-muted-foreground">
+        Injected into a machine&apos;s environment when it is created, not baked
+        into the image, so they never land in a layer anyone who can pull it
+        could read. Only Claude Code is supported so far.
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Run <code className="font-mono">claude setup-token</code> on your own
+        machine for a long-lived token, injected as{" "}
+        <code className="font-mono">CLAUDE_CODE_OAUTH_TOKEN</code>.{" "}
+        {keys === null ? "…" : tokenSet ? "A token is set." : "No token set."}
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          type="password"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder={tokenSet ? "Replace the stored token" : "Paste the token"}
+          className="max-w-sm font-mono"
+          autoComplete="off"
+          aria-label="Claude Code OAuth token"
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => save(draft)}
+          disabled={busy || draft.trim() === ""}
+        >
+          {busy ? "Saving…" : "Save token"}
+        </Button>
+        {tokenSet ? (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => save("")}
+            disabled={busy}
+          >
+            Clear
+          </Button>
+        ) : null}
+      </div>
+      {error !== null ? <p className="text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
+/** A template's configuration, its Build button, and its build history. */
+function TemplateDetail({
+  template,
   registryUrl,
   onBack,
   onDeleted,
 }: {
-  image: PluginImage;
+  template: PluginTemplate;
   registryUrl: string | null;
   onBack: () => void;
   onDeleted: () => void;
 }) {
   const rpc = useRpc<typeof rpcContract>();
-  const [name, setName] = useState(image.name);
-  const [commands, setCommands] = useState(image.commands);
-  const [env, setEnv] = useState<{ key: string; value: string }[]>(image.env);
+  const [name, setName] = useState(template.name);
+  const [commands, setCommands] = useState(template.commands);
+  const [env, setEnv] = useState<{ key: string; value: string }[]>(template.env);
   const [builds, setBuilds] = useState<PluginBuild[] | null>(null);
   const [openBuild, setOpenBuild] = useState<PluginBuild | null>(null);
   const [busy, setBusy] = useState(false);
@@ -902,11 +994,11 @@ function ImageDetail({
   }, []);
 
   const refetchBuilds = useCallback(() => {
-    rpc.call("builds_list", { imageId: image.id }).then(
+    rpc.call("builds_list", { templateId: template.id }).then(
       (r) => setBuilds(r.builds),
       report,
     );
-  }, [rpc, image.id, report]);
+  }, [rpc, template.id, report]);
 
   useEffect(refetchBuilds, [refetchBuilds]);
   useRealtime("images-changed", refetchBuilds);
@@ -915,7 +1007,7 @@ function ImageDetail({
     setBusy(true);
     setError(null);
     rpc
-      .call("images_update", { id: image.id, name, commands, env })
+      .call("templates_update", { id: template.id, name, commands, env })
       .then(() => {
         setBusy(false);
         setSaved(true);
@@ -927,8 +1019,8 @@ function ImageDetail({
     setError(null);
     // Save first: building the previous configuration would be surprising.
     rpc
-      .call("images_update", { id: image.id, name, commands, env })
-      .then(() => rpc.call("images_build", { id: image.id }))
+      .call("templates_update", { id: template.id, name, commands, env })
+      .then(() => rpc.call("templates_build", { id: template.id }))
       .then(() => {
         setBusy(false);
         refetchBuilds();
@@ -943,9 +1035,9 @@ function ImageDetail({
     <div className="space-y-4 text-sm">
       <div className="flex items-center gap-2">
         <Button variant="outline" size="sm" onClick={onBack}>
-          Back to images
+          Back to templates
         </Button>
-        <ImageStatus status={image.status} />
+        <TemplateStatus status={template.status} />
         {registryUrl === null ? null : (
           <UrlLink
             href={registryUrl}
@@ -1047,26 +1139,28 @@ function ImageDetail({
         </Button>
       </div>
 
+      <TemplateSecrets templateId={template.id} />
+
       {error !== null ? <p className="text-destructive">{error}</p> : null}
 
       {/* Why the last build failed. Without this the list just says "Error". */}
-      {image.status === "error" && image.lastError !== null ? (
+      {template.status === "error" && template.lastError !== null ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3">
           <p className="font-medium text-destructive">Last build failed</p>
-          <p className="mt-1 text-muted-foreground">{image.lastError}</p>
+          <p className="mt-1 text-muted-foreground">{template.lastError}</p>
         </div>
       ) : null}
 
       <div className="flex items-center gap-2">
-        <Button size="sm" onClick={build} disabled={busy || image.status === "building"}>
-          {image.status === "building" ? "Building…" : "Build"}
+        <Button size="sm" onClick={build} disabled={busy || template.status === "building"}>
+          {template.status === "building" ? "Building…" : "Build"}
         </Button>
         <Button variant="outline" size="sm" onClick={save} disabled={busy}>
           {saved ? "Saved" : "Save"}
         </Button>
-        {image.imageRef === null ? null : (
+        {template.imageRef === null ? null : (
           <span className="font-mono text-xs text-muted-foreground">
-            {image.imageRef}
+            {template.imageRef}
           </span>
         )}
         {/* Deleting drops the image and its build history from bb. The pushed
@@ -1081,11 +1175,11 @@ function ImageDetail({
               return;
             }
             setBusy(true);
-            rpc.call("images_delete", { id: image.id }).then(onDeleted, report);
+            rpc.call("templates_delete", { id: template.id }).then(onDeleted, report);
           }}
           disabled={busy}
         >
-          {confirmingDelete ? "Confirm delete" : "Delete image"}
+          {confirmingDelete ? "Confirm delete" : "Delete template"}
         </Button>
       </div>
 
@@ -1128,9 +1222,9 @@ function ImageDetail({
   );
 }
 
-function ImagesTab() {
+function TemplatesTab() {
   const rpc = useRpc<typeof rpcContract>();
-  const [images, setImages] = useState<PluginImage[] | null>(null);
+  const [templates, setTemplates] = useState<PluginTemplate[] | null>(null);
   const [registryUrl, setRegistryUrl] = useState<string | null>(null);
   const [presets, setPresets] = useState<
     { id: string; label: string; description: string }[]
@@ -1143,8 +1237,8 @@ function ImagesTab() {
   }, []);
 
   const refetch = useCallback(() => {
-    rpc.call("images_list").then((r) => {
-      setImages(r.images);
+    rpc.call("templates_list").then((r) => {
+      setTemplates(r.templates);
       setRegistryUrl(r.registryUrl);
       setPresets(r.presets);
     }, report);
@@ -1154,17 +1248,17 @@ function ImagesTab() {
   useRealtime("images-changed", refetch);
 
   const createFrom = (presetId: string) => {
-    rpc.call("images_create", { presetId }).then((image) => {
+    rpc.call("templates_create", { presetId }).then((created) => {
       refetch();
-      setOpenId(image.id);
+      setOpenId(created.id);
     }, report);
   };
 
-  const open = images?.find((image) => image.id === openId) ?? null;
+  const open = templates?.find((entry) => entry.id === openId) ?? null;
   if (open !== null) {
     return (
-      <ImageDetail
-        image={open}
+      <TemplateDetail
+        template={open}
         registryUrl={registryUrl}
         onBack={() => setOpenId(null)}
         onDeleted={() => {
@@ -1184,14 +1278,14 @@ function ImagesTab() {
           onClick={() => createFrom("blank")}
         >
           <Icon name="Plus" className="mr-1.5 size-4" aria-hidden />
-          Create image
+          Create template
         </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
               size="sm"
               className="rounded-l-none border-l border-background/30 px-2"
-              aria-label="Create image from a preset"
+              aria-label="Create template from a preset"
             >
               {"\u25be"}
             </Button>
@@ -1218,125 +1312,35 @@ function ImagesTab() {
 
       {error !== null ? <p className="text-destructive">{error}</p> : null}
 
-      {images === null ? (
+      {templates === null ? (
         <p className="text-muted-foreground">Loading…</p>
-      ) : images.length === 0 ? (
+      ) : templates.length === 0 ? (
         <p className="text-muted-foreground">
-          No images yet. An image bakes bb&apos;s prerequisites and your own
-          setup commands, so cloud machines created from it start faster.
+          No templates yet. A template bakes bb&apos;s prerequisites and your own
+          setup commands into an image, and carries the credentials its
+          machines are given.
         </p>
       ) : (
         <ul className="space-y-2">
-          {images.map((image) => (
-            <li key={image.id}>
+          {templates.map((entry) => (
+            <li key={entry.id}>
               <button
                 type="button"
-                onClick={() => setOpenId(image.id)}
+                onClick={() => setOpenId(entry.id)}
                 className="flex w-full items-center gap-3 rounded-lg border border-border p-3 text-left hover:bg-card"
               >
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">{image.name}</span>
+                  <span className="block truncate font-medium">{entry.name}</span>
                   <span className="block truncate font-mono text-xs text-muted-foreground">
-                    {image.imageRef ?? "not built yet"}
+                    {entry.imageRef ?? "not built yet"}
                   </span>
                 </span>
-                <ImageStatus status={image.status} />
+                <TemplateStatus status={entry.status} />
               </button>
             </li>
           ))}
         </ul>
       )}
-    </div>
-  );
-}
-
-/**
- * Agent credentials. Only Claude Code is supported for now.
- *
- * The token is write-only from the UI's point of view: the backend reports
- * whether one is set but never sends the value back, because a secret setting
- * is deliberately excluded from the frontend's settings snapshot.
- */
-function AgentsTab() {
-  const rpc = useRpc<typeof rpcContract>();
-  const [tokenSet, setTokenSet] = useState<boolean | null>(null);
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const report = useCallback((cause: unknown) => {
-    setBusy(false);
-    setError(cause instanceof Error ? cause.message : String(cause));
-  }, []);
-
-  useEffect(() => {
-    rpc.call("agents_status").then((r) => setTokenSet(r.claudeCodeTokenSet), report);
-  }, [rpc, report]);
-
-  const save = (value: string) => {
-    setBusy(true);
-    setError(null);
-    rpc.call("agents_set_claude_token", { token: value }).then((r) => {
-      setBusy(false);
-      setTokenSet(r.claudeCodeTokenSet);
-      setDraft("");
-    }, report);
-  };
-
-  return (
-    <div className="space-y-4 text-sm">
-      <div className="space-y-2">
-        <p className="font-medium">Claude Code</p>
-        <p className="text-muted-foreground">
-          Run{" "}
-          <code className="font-mono">claude setup-token</code> on your own
-          machine to obtain a long-lived OAuth token, then paste it here.
-        </p>
-        {tokenSet === null ? (
-          <p className="text-muted-foreground">Loading…</p>
-        ) : (
-          <p className="text-muted-foreground">
-            Status:{" "}
-            <span className="font-medium text-foreground">
-              {tokenSet ? "A token is set" : "No token set"}
-            </span>
-          </p>
-        )}
-        <div className="flex flex-wrap items-center gap-2">
-          <Input
-            type="password"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder={tokenSet ? "Replace the stored token" : "Paste the token"}
-            className="max-w-sm font-mono"
-            autoComplete="off"
-            aria-label="Claude Code OAuth token"
-          />
-          <Button
-            size="sm"
-            onClick={() => save(draft)}
-            disabled={busy || draft.trim() === ""}
-          >
-            {busy ? "Saving…" : "Save token"}
-          </Button>
-          {tokenSet ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => save("")}
-              disabled={busy}
-            >
-              Clear
-            </Button>
-          ) : null}
-        </div>
-        {error !== null ? <p className="text-destructive">{error}</p> : null}
-      </div>
-
-      <p className="text-xs text-muted-foreground">
-        Other agent providers are not supported yet. Machines created before a
-        token is set do not receive it; recreate them to pick it up.
-      </p>
     </div>
   );
 }
@@ -1453,29 +1457,26 @@ function VercelAuthSection() {
 
 /** Images, Agents and Configuration, per the plugin's settings page. */
 /** Route of this plugin's settings page; `#images` opens the Images tab. */
-export const SETTINGS_IMAGES_HREF = "/settings/plugins/cloud-sandbox#images";
+export const SETTINGS_TEMPLATES_HREF =
+  "/settings/plugins/cloud-sandbox#templates";
 
-const SETTINGS_TABS = ["images", "agents", "authentication"] as const;
+const SETTINGS_TABS = ["templates", "authentication"] as const;
 
 function CloudSandboxSettings() {
   // The tab is component state, so a deep link has to carry it in the hash.
   const [tab, setTab] = useState(() => {
     const hash =
       typeof window === "undefined" ? "" : window.location.hash.replace("#", "");
-    return (SETTINGS_TABS as readonly string[]).includes(hash) ? hash : "images";
+    return (SETTINGS_TABS as readonly string[]).includes(hash) ? hash : "templates";
   });
   return (
     <Tabs value={tab} onValueChange={setTab}>
       <TabsList>
-        <TabsTrigger value="images">Images</TabsTrigger>
-        <TabsTrigger value="agents">Agents</TabsTrigger>
+        <TabsTrigger value="templates">Templates</TabsTrigger>
         <TabsTrigger value="authentication">Authentication</TabsTrigger>
       </TabsList>
-      <TabsContent value="images" className="pt-4">
-        <ImagesTab />
-      </TabsContent>
-      <TabsContent value="agents" className="pt-4">
-        <AgentsTab />
+      <TabsContent value="templates" className="pt-4">
+        <TemplatesTab />
       </TabsContent>
       <TabsContent value="authentication" className="pt-4">
         <VercelAuthSection />

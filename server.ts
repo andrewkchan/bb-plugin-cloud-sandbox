@@ -144,26 +144,26 @@ const machineViewSchema = z.object({
 });
 export type MachineView = z.infer<typeof machineViewSchema>;
 
-const imageStatusSchema = z.enum(["pending", "building", "ready", "error"]);
+const templateStatusSchema = z.enum(["pending", "building", "ready", "error"]);
 
 const envVarSchema = z.object({
   key: z.string().min(1).max(200),
   value: z.string().max(10_000),
 });
 
-const imageSchema = z.object({
+const templateSchema = z.object({
   id: z.string(),
   name: z.string(),
   commands: z.string(),
   env: z.array(envVarSchema),
-  status: imageStatusSchema,
+  status: templateStatusSchema,
   /** Reference to pass to Sandbox.create, once a build has succeeded. */
   imageRef: z.string().nullable(),
   lastError: z.string().nullable(),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
-export type PluginImage = z.infer<typeof imageSchema>;
+export type PluginTemplate = z.infer<typeof templateSchema>;
 
 const buildSchema = z.object({
   id: z.string(),
@@ -243,10 +243,10 @@ export const rpcContract = defineRpcContract({
     input: z.object({ name: z.string().min(1) }),
     output: z.object({ removed: z.boolean() }),
   },
-  images_list: {
+  templates_list: {
     input: z.null(),
     output: z.object({
-      images: z.array(imageSchema),
+      templates: z.array(templateSchema),
       /** The repository's images on vercel.com, when derivable. */
       registryUrl: z.string().nullable(),
       /** Starting points offered by the Create image button. */
@@ -259,29 +259,43 @@ export const rpcContract = defineRpcContract({
       ),
     }),
   },
-  images_create: {
+  templates_create: {
     input: z.object({ presetId: z.string() }),
-    output: imageSchema,
+    output: templateSchema,
   },
-  images_update: {
+  templates_update: {
     input: z.object({
       id: z.string(),
       name: z.string().min(1).max(80).optional(),
       commands: z.string().max(50_000).optional(),
       env: z.array(envVarSchema).max(100).optional(),
     }),
-    output: imageSchema,
+    output: templateSchema,
   },
-  images_delete: {
+  templates_delete: {
     input: z.object({ id: z.string() }),
     output: z.object({ deleted: z.boolean() }),
   },
-  images_build: {
+  /** Which secrets a template holds. Values are never returned. */
+  templates_secret_keys: {
+    input: z.object({ templateId: z.string() }),
+    output: z.object({ keys: z.array(z.string()) }),
+  },
+  /** Set or, with an empty value, clear one of a template's secrets. */
+  templates_set_secret: {
+    input: z.object({
+      templateId: z.string(),
+      key: z.string().min(1).max(200),
+      value: z.string().max(20_000),
+    }),
+    output: z.object({ keys: z.array(z.string()) }),
+  },
+  templates_build: {
     input: z.object({ id: z.string() }),
     output: z.object({ started: z.boolean() }),
   },
   builds_list: {
-    input: z.object({ imageId: z.string() }),
+    input: z.object({ templateId: z.string() }),
     output: z.object({ builds: z.array(buildSchema) }),
   },
   build_log: {
@@ -322,12 +336,21 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Machine lifetime (seconds; max 2700 on Hobby, 86400 on Pro)",
       default: "2700",
     },
-    // Claude Code accepts a long-lived OAuth token from `claude setup-token`.
-    // It is injected into the machine's environment at creation, not baked
-    // into an image, so it never lands in a shared image layer.
+    // Secrets a template injects when a machine is created, as JSON keyed by
+    // template id. They live in a secret setting so they land in the plugin's
+    // 0600 secrets directory rather than its database, and they are injected
+    // per machine rather than baked into an image, so a credential never ends
+    // up in a layer anyone who can pull the image could read.
+    templateSecrets: {
+      type: "string",
+      label: "Template secrets (managed by the Templates tab)",
+      secret: true,
+    },
+    // Superseded by templateSecrets; read once at load to migrate, then
+    // cleared. Safe to delete once no install carries a value.
     claudeCodeOauthToken: {
       type: "string",
-      label: "Claude Code OAuth token",
+      label: "Claude Code OAuth token (legacy — moved to templates)",
       secret: true,
     },
     machineVcpus: {
@@ -382,9 +405,12 @@ export default async function plugin(bb: BbPluginApi) {
        log TEXT NOT NULL DEFAULT ''
      )`,
     `CREATE INDEX IF NOT EXISTS builds_by_image ON builds (image_id, started_at DESC)`,
+    // An image became a template: the OCI image is now one part of it,
+    // alongside secrets injected when a machine is created.
+    `ALTER TABLE images RENAME TO templates`,
   ]);
 
-  interface ImageRow {
+  interface TemplateRow {
     id: string;
     name: string;
     commands: string;
@@ -396,14 +422,14 @@ export default async function plugin(bb: BbPluginApi) {
     updated_at: number;
   }
 
-  function toImage(row: ImageRow): PluginImage {
+  function toTemplate(row: TemplateRow): PluginTemplate {
     const parsed = z.array(envVarSchema).safeParse(JSON.parse(row.env));
     return {
       id: row.id,
       name: row.name,
       commands: row.commands,
       env: parsed.success ? parsed.data : [],
-      status: imageStatusSchema.parse(row.status),
+      status: templateStatusSchema.parse(row.status),
       imageRef: row.image_ref,
       lastError: row.last_error,
       createdAt: row.created_at,
@@ -411,25 +437,25 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  function listImages(): PluginImage[] {
+  function listTemplates(): PluginTemplate[] {
     return db
-      .prepare("SELECT * FROM images ORDER BY created_at DESC")
+      .prepare("SELECT * FROM templates ORDER BY created_at DESC")
       .all()
-      .map((row) => toImage(row as ImageRow));
+      .map((row) => toTemplate(row as TemplateRow));
   }
 
-  function getImage(id: string): PluginImage | null {
-    const row = db.prepare("SELECT * FROM images WHERE id = ?").get(id);
-    return row === undefined ? null : toImage(row as ImageRow);
+  function getTemplate(id: string): PluginTemplate | null {
+    const row = db.prepare("SELECT * FROM templates WHERE id = ?").get(id);
+    return row === undefined ? null : toTemplate(row as TemplateRow);
   }
 
-  function setImageStatus(
+  function setTemplateStatus(
     id: string,
-    status: PluginImage["status"],
+    status: PluginTemplate["status"],
     fields: { imageRef?: string | null; lastError?: string | null } = {},
   ): void {
     db.prepare(
-      `UPDATE images SET status = ?, updated_at = ?,
+      `UPDATE templates SET status = ?, updated_at = ?,
          image_ref = COALESCE(?, image_ref),
          last_error = ?
        WHERE id = ?`,
@@ -443,8 +469,66 @@ export default async function plugin(bb: BbPluginApi) {
     bb.realtime.publish(IMAGES_CHANGED, {});
   }
 
-  /** Images whose build is running in this plugin generation. */
+  /** Templates whose build is running in this plugin generation. */
   const building = new Set<string>();
+
+  const templateSecretsSchema = z.record(z.string(), z.record(z.string(), z.string()));
+
+  async function readAllSecrets(): Promise<Record<string, Record<string, string>>> {
+    const { templateSecrets } = await settings.get();
+    if (templateSecrets === undefined || templateSecrets.trim() === "") return {};
+    const parsed = templateSecretsSchema.safeParse(
+      JSON.parse(templateSecrets) as unknown,
+    );
+    return parsed.success ? parsed.data : {};
+  }
+
+  async function readSecrets(templateId: string): Promise<Record<string, string>> {
+    return (await readAllSecrets())[templateId] ?? {};
+  }
+
+  async function writeSecrets(
+    templateId: string,
+    secrets: Record<string, string>,
+  ): Promise<void> {
+    const all = await readAllSecrets();
+    if (Object.keys(secrets).length === 0) delete all[templateId];
+    else all[templateId] = secrets;
+    await bb.sdk.plugins.updateSettings({
+      pluginId: bb.pluginId,
+      values: { templateSecrets: JSON.stringify(all) },
+    });
+  }
+
+  /**
+   * Move the old plugin-wide Claude Code token onto every template.
+   *
+   * The token used to apply to every machine, so applying it to every template
+   * preserves that behaviour exactly. Runs once: the legacy setting is cleared
+   * afterwards.
+   */
+  async function migrateLegacyClaudeToken(): Promise<void> {
+    const { claudeCodeOauthToken } = await settings.get();
+    const token = (claudeCodeOauthToken ?? "").trim();
+    if (token === "") return;
+    const all = await readAllSecrets();
+    for (const template of listTemplates()) {
+      all[template.id] = {
+        ...(all[template.id] ?? {}),
+        CLAUDE_CODE_OAUTH_TOKEN: token,
+      };
+    }
+    await bb.sdk.plugins.updateSettings({
+      pluginId: bb.pluginId,
+      values: {
+        templateSecrets: JSON.stringify(all),
+        claudeCodeOauthToken: "",
+      },
+    });
+    bb.log.info(
+      `migrated the plugin-wide Claude Code token onto ${listTemplates().length} template(s)`,
+    );
+  }
 
   // ---------------------------------------------------------------- events
 
@@ -800,7 +884,7 @@ export default async function plugin(bb: BbPluginApi) {
     // Anything that has ever built successfully can still create a machine.
     // Keying this off status would strand a working image the moment a later
     // rebuild failed, even though its published manifest is untouched.
-    const readyImages = listImages()
+    const readyImages = listTemplates()
       .filter((image) => image.imageRef !== null)
       .map((image) => ({ id: image.id, name: image.name }));
     const defaultImageId = await resolveDefaultImageId(readyImages);
@@ -974,16 +1058,14 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /**
-   * Agent credentials handed to a machine at creation.
+   * Secrets a template hands to its machines at creation.
    *
-   * These are deliberately environment variables on the sandbox rather than
-   * anything baked into an image: an image is a shared artifact, and a
-   * long-lived token must not end up in one of its layers.
+   * These are environment variables on the sandbox rather than anything baked
+   * into its image: an image is a shared artifact that anyone able to pull it
+   * can read, so a long-lived credential must not end up in one of its layers.
    */
-  async function agentEnv(): Promise<Record<string, string>> {
-    const { claudeCodeOauthToken } = await settings.get();
-    const token = (claudeCodeOauthToken ?? "").trim();
-    return token === "" ? {} : { CLAUDE_CODE_OAUTH_TOKEN: token };
+  async function templateEnv(templateId: string | null): Promise<Record<string, string>> {
+    return templateId === null ? {} : readSecrets(templateId);
   }
 
   /**
@@ -1008,10 +1090,10 @@ export default async function plugin(bb: BbPluginApi) {
   async function startCreate(imageId: string | null): Promise<boolean> {
     const credentials = await requireCredentials();
     const values = await settings.get();
-    const image = imageId === null ? null : getImage(imageId);
-    if (imageId !== null && (image === null || image.imageRef === null)) {
+    const template = imageId === null ? null : getTemplate(imageId);
+    if (imageId !== null && (template === null || template.imageRef === null)) {
       throw new Error(
-        `Image ${imageId} has not been built, so no machine can be created from it.`,
+        `Template ${imageId} has not been built, so no machine can be created from it.`,
       );
     }
     const seconds = Number.parseInt(values.machineTimeoutSeconds, 10);
@@ -1031,18 +1113,19 @@ export default async function plugin(bb: BbPluginApi) {
         await record(
           "create.requested",
           null,
-          image === null
+          template === null
             ? "Creating a cloud machine from the default sandbox image."
-            : `Creating a cloud machine from image "${image.name}".`,
+            : `Creating a cloud machine from template "${template.name}".`,
         );
         // Remember the choice so the button defaults to it next time.
-        if (image !== null) await bb.storage.kv.set("lastImageId", image.id);
+        if (template !== null)
+          await bb.storage.kv.set("lastImageId", template.id);
         const enrollment = await mintEnrollment();
         const result = await createMachine({
           credentials,
           enrollment,
-          env: await agentEnv(),
-          ...(image?.imageRef == null ? {} : { image: image.imageRef }),
+          env: await templateEnv(template?.id ?? null),
+          ...(template?.imageRef == null ? {} : { image: template.imageRef }),
           timeoutMs,
           vcpus: Number.isFinite(vcpus) ? vcpus : 2,
           onCreated: async (name) => {
@@ -1054,8 +1137,8 @@ export default async function plugin(bb: BbPluginApi) {
                 hostId: enrollment.hostId,
                 createdAt: Date.now(),
                 disconnectedAt: null,
-                imageId: image?.id ?? null,
-                imageName: image?.name ?? null,
+                imageId: template?.id ?? null,
+                imageName: template?.name ?? null,
               },
               ...(await readRecords()),
             ]);
@@ -1216,7 +1299,7 @@ export default async function plugin(bb: BbPluginApi) {
    */
   async function startBuild(imageId: string): Promise<boolean> {
     if (building.has(imageId)) return false;
-    const image = getImage(imageId);
+    const image = getTemplate(imageId);
     if (image === null) throw new Error(`No image with id ${imageId}`);
 
     const session = await ensureFreshSession();
@@ -1236,7 +1319,7 @@ export default async function plugin(bb: BbPluginApi) {
       "INSERT INTO builds (id, image_id, status, started_at, log) VALUES (?, ?, 'building', ?, '')",
     ).run(buildId, imageId, Date.now());
     building.add(imageId);
-    setImageStatus(imageId, "building", { lastError: null });
+    setTemplateStatus(imageId, "building", { lastError: null });
 
     void (async () => {
       const appendLog = (chunk: string) => {
@@ -1265,7 +1348,7 @@ export default async function plugin(bb: BbPluginApi) {
         db.prepare(
           "UPDATE builds SET status = 'ready', finished_at = ?, image_ref = ? WHERE id = ?",
         ).run(Date.now(), result.imageRef, buildId);
-        setImageStatus(imageId, "ready", { imageRef: result.imageRef });
+        setTemplateStatus(imageId, "ready", { imageRef: result.imageRef });
         bb.log.info(`image ${image.name} built as ${result.imageRef}`);
         // Rebuilding a tag leaves the manifest it replaced untagged and full
         // size, so only the latest hash for each image is kept.
@@ -1275,7 +1358,7 @@ export default async function plugin(bb: BbPluginApi) {
         db.prepare(
           "UPDATE builds SET status = 'error', finished_at = ?, error = ? WHERE id = ?",
         ).run(Date.now(), message, buildId);
-        setImageStatus(imageId, "error", { lastError: message });
+        setTemplateStatus(imageId, "error", { lastError: message });
         bb.log.warn(`image ${image.name} build failed: ${message}`);
       } finally {
         building.delete(imageId);
@@ -1323,10 +1406,10 @@ export default async function plugin(bb: BbPluginApi) {
     machines_remove: async ({ name }) => ({
       removed: await removeMachineByName(name),
     }),
-    images_list: async () => {
+    templates_list: async () => {
       const session = await readStoredSession();
       return {
-        images: listImages(),
+        templates: listTemplates(),
         presets: IMAGE_PRESETS.map(({ id, label, description }) => ({
           id,
           label,
@@ -1338,18 +1421,18 @@ export default async function plugin(bb: BbPluginApi) {
             : vercelProjectUrl(session, `images/${DEFAULT_REPOSITORY}`),
       };
     },
-    images_create: ({ presetId }) => {
+    templates_create: ({ presetId }) => {
       const preset = findPreset(presetId);
       if (preset === null) throw new Error(`No image preset "${presetId}"`);
       const now = Date.now();
       const id = randomUUID().slice(0, 8);
       const count = (
-        db.prepare("SELECT COUNT(*) AS n FROM images").get() as { n: number }
+        db.prepare("SELECT COUNT(*) AS n FROM templates").get() as { n: number }
       ).n;
       // A preset only seeds the row; it is ordinary editable configuration
       // from here, not a link that keeps updating.
       db.prepare(
-        `INSERT INTO images (id, name, commands, env, status, created_at, updated_at)
+        `INSERT INTO templates (id, name, commands, env, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
       ).run(
         id,
@@ -1360,15 +1443,15 @@ export default async function plugin(bb: BbPluginApi) {
         now,
       );
       bb.realtime.publish(IMAGES_CHANGED, {});
-      const created = getImage(id);
+      const created = getTemplate(id);
       if (created === null) throw new Error("Image was not created.");
       return created;
     },
-    images_update: ({ id, name, commands, env }) => {
-      const existing = getImage(id);
+    templates_update: ({ id, name, commands, env }) => {
+      const existing = getTemplate(id);
       if (existing === null) throw new Error(`No image with id ${id}`);
       db.prepare(
-        `UPDATE images SET name = ?, commands = ?, env = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE templates SET name = ?, commands = ?, env = ?, updated_at = ? WHERE id = ?`,
       ).run(
         name ?? existing.name,
         commands ?? existing.commands,
@@ -1377,13 +1460,15 @@ export default async function plugin(bb: BbPluginApi) {
         id,
       );
       bb.realtime.publish(IMAGES_CHANGED, {});
-      const updated = getImage(id);
+      const updated = getTemplate(id);
       if (updated === null) throw new Error(`No image with id ${id}`);
       return updated;
     },
-    images_delete: async ({ id }) => {
+    templates_delete: async ({ id }) => {
       db.prepare("DELETE FROM builds WHERE image_id = ?").run(id);
-      const result = db.prepare("DELETE FROM images WHERE id = ?").run(id);
+      const result = db.prepare("DELETE FROM templates WHERE id = ?").run(id);
+      // A template's secrets have no meaning without it.
+      await writeSecrets(id, {});
       bb.realtime.publish(IMAGES_CHANGED, {});
       // The tag is the image id, so this removes exactly this image's
       // manifest; the prune then catches anything it superseded.
@@ -1393,13 +1478,23 @@ export default async function plugin(bb: BbPluginApi) {
       await recordCleanup("prune after delete", pruneUntaggedImages);
       return { deleted: result.changes > 0 };
     },
-    images_build: async ({ id }) => ({ started: await startBuild(id) }),
-    builds_list: ({ imageId }) => ({
+    templates_build: async ({ id }) => ({ started: await startBuild(id) }),
+    templates_secret_keys: async ({ templateId }) => ({
+      keys: Object.keys(await readSecrets(templateId)).sort(),
+    }),
+    templates_set_secret: async ({ templateId, key, value }) => {
+      const secrets = await readSecrets(templateId);
+      if (value.trim() === "") delete secrets[key];
+      else secrets[key] = value.trim();
+      await writeSecrets(templateId, secrets);
+      return { keys: Object.keys(secrets).sort() };
+    },
+    builds_list: ({ templateId }) => ({
       builds: db
         .prepare(
           "SELECT id, image_id, status, started_at, finished_at, image_ref, error FROM builds WHERE image_id = ? ORDER BY started_at DESC LIMIT 50",
         )
-        .all(imageId)
+        .all(templateId)
         .map((row) => {
           const build = row as {
             id: string;
@@ -1430,6 +1525,20 @@ export default async function plugin(bb: BbPluginApi) {
       const cleared = (await readEvents()).length;
       await bb.storage.kv.set("events", []);
       return { cleared };
+    },
+  });
+
+  // The migration writes a setting this factory is still registering, and the
+  // settings route validates against the *active* descriptor set, so writing
+  // from inside the factory fails with `unknown setting`. A service runs once
+  // the registration is live.
+  bb.background.service("migrate-legacy-secrets", {
+    async start() {
+      await migrateLegacyClaudeToken().catch((error: unknown) => {
+        bb.log.warn(
+          `legacy Claude token migration failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     },
   });
 

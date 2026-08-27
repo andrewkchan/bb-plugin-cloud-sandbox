@@ -17,8 +17,8 @@ existing install.
   delete it; plus create, manual refresh,
   links to bb's own machine settings and to the project's sandboxes on
   vercel.com, and a collapsible debug log.
-- **Settings** — three tabs: **Images** (custom machine images), **Agents**
-  (agent credentials) and **Authentication** (the Vercel account).
+- **Settings** — two tabs: **Templates** (what a machine is made of) and
+  **Authentication** (the Vercel account).
 
 ## Setup
 
@@ -74,17 +74,28 @@ bb plugin logs cloud-sandbox -f
 
 ## Agent credentials
 
-The Agents tab stores a long-lived Claude Code OAuth token, obtained by
-running `claude setup-token`. It is injected into each machine's environment
-as `CLAUDE_CODE_OAUTH_TOKEN` **when the machine is created**, deliberately not
-baked into an image: an image is a shared artifact and a long-lived token must
-not end up in one of its layers. Machines created before a token is set do not
-receive it. Other agent providers are not supported yet.
+Each template holds its own credentials, edited on its page. Claude Code takes
+a long-lived OAuth token from `claude setup-token`, injected into a machine's
+environment as `CLAUDE_CODE_OAUTH_TOKEN` **when the machine is created**.
 
-## Images
+This is the distinction the template concept exists to draw. A build-time
+variable is baked into the image and readable by anyone who can pull it; a
+secret is handed to the machine at creation and never enters a layer. Both
+belong to the template, so a credential travels with the thing that defines
+the machine rather than sitting plugin-wide.
 
-An image bakes bb's prerequisites plus your own setup, so a machine created
-from it starts without repeating that work. **Create image** starts from a
+Secrets are stored as one JSON secret setting keyed by template id, so they
+land in the plugin's 0600 secrets directory rather than its database. They are
+write-only from the UI: the backend reports which keys are set and never
+returns a value. Machines created before a credential is set do not receive
+it. Only Claude Code is supported so far.
+
+## Templates
+
+A template is what a cloud machine is made of: an image, plus the credentials
+its machines are given. The image bakes bb's prerequisites and your own setup
+so a machine starts without repeating that work; the credentials are injected
+when the machine is created and never enter a layer. **Create image** starts from a
 preset — Blank, Claude Code, or
 [pi.dev](https://pi.dev/docs/latest/providers#environment-variables-or-auth-file),
 which installs the pi coding agent and seeds its provider API-key variable
