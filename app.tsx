@@ -481,80 +481,69 @@ function MachinesPage() {
     <div className="h-full overflow-auto p-4 md:p-5">
       <div className="mx-auto w-full max-w-4xl space-y-4">
         <div className="flex flex-wrap items-center gap-2">
-          {readyImages.length === 0 ? (
-            // Without a built image a machine would install bb's prerequisites
-            // from scratch, so point at the Images tab instead of offering it.
-            <Button size="sm" asChild>
-              <UrlLink href={SETTINGS_IMAGES_HREF}>
+          <div className="flex items-center">
+            <Button
+              size="sm"
+              className="rounded-r-none"
+              onClick={() => create(selectedImageId)}
+              disabled={creating || !signedIn}
+            >
+              {creating ? (
+                <Spinner className="mr-2" />
+              ) : (
                 <Icon name="Plus" className="mr-1.5 size-4" aria-hidden />
-                Setup images
-              </UrlLink>
+              )}
+              {creating
+                ? "Creating\u2026"
+                : `Create cloud machine (${selectedImageName})`}
             </Button>
-          ) : (
-            <div className="flex items-center">
-              <Button
-                size="sm"
-                className="rounded-r-none"
-                onClick={() => create(selectedImageId)}
-                disabled={creating || !signedIn}
-              >
-                {creating ? (
-                  <Spinner className="mr-2" />
-                ) : (
-                  <Icon name="Plus" className="mr-1.5 size-4" aria-hidden />
-                )}
-                {creating
-                  ? "Creating\u2026"
-                  : `Create cloud machine (${selectedImageName})`}
-              </Button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    size="sm"
-                    className="rounded-l-none border-l border-background/30 px-2"
-                    disabled={creating || !signedIn}
-                    aria-label={`Change image, currently ${selectedImageName}`}
-                  >
-                    {"\u25be"}
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  {/* A radio group, not a list of actions: choosing an entry
-                      only changes what the button will do. */}
-                  <DropdownMenuRadioGroup
-                    value={selectedImageId ?? ""}
-                    onValueChange={(value) => {
-                      setPickedImageId(value === "" ? null : value);
-                      setHasPicked(true);
-                    }}
-                  >
-                    {readyImages.map((image) => (
-                      <DropdownMenuRadioItem key={image.id} value={image.id}>
-                        {image.name}
-                      </DropdownMenuRadioItem>
-                    ))}
-                    <DropdownMenuSeparator />
-                    <DropdownMenuRadioItem value="">
-                      No image (default sandbox)
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  className="rounded-l-none border-l border-background/30 px-2"
+                  disabled={creating || !signedIn}
+                  aria-label={`Change image, currently ${selectedImageName}`}
+                >
+                  {"\u25be"}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                {/* A radio group, not a list of actions: choosing an entry
+                    only changes what the button will do. */}
+                <DropdownMenuRadioGroup
+                  value={selectedImageId ?? ""}
+                  onValueChange={(value) => {
+                    setPickedImageId(value === "" ? null : value);
+                    setHasPicked(true);
+                  }}
+                >
+                  {readyImages.map((image) => (
+                    <DropdownMenuRadioItem key={image.id} value={image.id}>
+                      {image.name}
                     </DropdownMenuRadioItem>
-                  </DropdownMenuRadioGroup>
-                  <DropdownMenuSeparator />
-                  {/* Sits outside the radio group: this navigates away rather
-                      than changing the selection, and the icon says so. */}
-                  <DropdownMenuItem asChild>
-                    <UrlLink href={SETTINGS_IMAGES_HREF}>
-                      Configure images
-                      <Icon
-                        name="ExternalLink"
-                        className="ml-auto size-3.5 opacity-60"
-                        aria-hidden
-                      />
-                    </UrlLink>
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          )}
+                  ))}
+                  {readyImages.length === 0 ? null : <DropdownMenuSeparator />}
+                  <DropdownMenuRadioItem value="">
+                    No image (default sandbox)
+                  </DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+                <DropdownMenuSeparator />
+                {/* Sits outside the radio group: this navigates away rather
+                    than changing the selection, and the icon says so. */}
+                <DropdownMenuItem asChild>
+                  <UrlLink href={SETTINGS_IMAGES_HREF}>
+                    Configure images
+                    <Icon
+                      name="ExternalLink"
+                      className="ml-auto size-3.5 opacity-60"
+                      aria-hidden
+                    />
+                  </UrlLink>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
           {/* Internal bb route: UrlLink keeps it in SPA history. */}
           <UrlLink
             href="/settings/machines"
@@ -843,7 +832,17 @@ function BuildLog({ build, onBack }: { build: PluginBuild; onBack: () => void })
 }
 
 /** An image's configuration, its Build button, and its build history. */
-function ImageDetail({ image, onBack }: { image: PluginImage; onBack: () => void }) {
+function ImageDetail({
+  image,
+  registryUrl,
+  onBack,
+  onDeleted,
+}: {
+  image: PluginImage;
+  registryUrl: string | null;
+  onBack: () => void;
+  onDeleted: () => void;
+}) {
   const rpc = useRpc<typeof rpcContract>();
   const [name, setName] = useState(image.name);
   const [commands, setCommands] = useState(image.commands);
@@ -853,6 +852,7 @@ function ImageDetail({ image, onBack }: { image: PluginImage; onBack: () => void
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const report = useCallback((cause: unknown) => {
     setBusy(false);
@@ -904,6 +904,15 @@ function ImageDetail({ image, onBack }: { image: PluginImage; onBack: () => void
           Back to images
         </Button>
         <ImageStatus status={image.status} />
+        {registryUrl === null ? null : (
+          <UrlLink
+            href={registryUrl}
+            className="ml-auto flex items-center gap-1 text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+          >
+            Manage images on Vercel
+            <Icon name="ExternalLink" className="size-3.5 opacity-60" aria-hidden />
+          </UrlLink>
+        )}
       </div>
 
       <div className="space-y-1.5">
@@ -1009,6 +1018,24 @@ function ImageDetail({ image, onBack }: { image: PluginImage; onBack: () => void
             {image.imageRef}
           </span>
         )}
+        {/* Deleting drops the image and its build history from bb. The pushed
+            tag stays in the registry, which "Manage images on Vercel" reaches. */}
+        <Button
+          variant="destructive"
+          size="sm"
+          className="ml-auto"
+          onClick={() => {
+            if (!confirmingDelete) {
+              setConfirmingDelete(true);
+              return;
+            }
+            setBusy(true);
+            rpc.call("images_delete", { id: image.id }).then(onDeleted, report);
+          }}
+          disabled={busy}
+        >
+          {confirmingDelete ? "Confirm delete" : "Delete image"}
+        </Button>
       </div>
 
       <div className="space-y-1.5">
@@ -1053,6 +1080,7 @@ function ImageDetail({ image, onBack }: { image: PluginImage; onBack: () => void
 function ImagesTab() {
   const rpc = useRpc<typeof rpcContract>();
   const [images, setImages] = useState<PluginImage[] | null>(null);
+  const [registryUrl, setRegistryUrl] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -1061,7 +1089,10 @@ function ImagesTab() {
   }, []);
 
   const refetch = useCallback(() => {
-    rpc.call("images_list").then((r) => setImages(r.images), report);
+    rpc.call("images_list").then((r) => {
+      setImages(r.images);
+      setRegistryUrl(r.registryUrl);
+    }, report);
   }, [rpc, report]);
 
   useEffect(refetch, [refetch]);
@@ -1069,7 +1100,17 @@ function ImagesTab() {
 
   const open = images?.find((image) => image.id === openId) ?? null;
   if (open !== null) {
-    return <ImageDetail image={open} onBack={() => setOpenId(null)} />;
+    return (
+      <ImageDetail
+        image={open}
+        registryUrl={registryUrl}
+        onBack={() => setOpenId(null)}
+        onDeleted={() => {
+          setOpenId(null);
+          refetch();
+        }}
+      />
+    );
   }
 
   return (

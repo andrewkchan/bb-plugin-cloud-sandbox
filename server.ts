@@ -28,7 +28,11 @@ import {
   type EnrollmentDetails,
   type SandboxCredentials,
 } from "./machines.js";
-import { buildImage, type ImageEnvVar } from "./images.js";
+import {
+  buildImage,
+  DEFAULT_REPOSITORY,
+  type ImageEnvVar,
+} from "./images.js";
 
 /** Debug events kept for troubleshooting. Bounded to stay under the kv cap. */
 const MAX_EVENTS = 200;
@@ -230,7 +234,11 @@ export const rpcContract = defineRpcContract({
   },
   images_list: {
     input: z.null(),
-    output: z.object({ images: z.array(imageSchema) }),
+    output: z.object({
+      images: z.array(imageSchema),
+      /** The repository's images on vercel.com, when derivable. */
+      registryUrl: z.string().nullable(),
+    }),
   },
   images_create: { input: z.null(), output: imageSchema },
   images_update: {
@@ -615,10 +623,18 @@ export default async function plugin(bb: BbPluginApi) {
    * than guessing.
    */
   function buildVercelUrl(session: StoredSession): string | null {
+    return vercelProjectUrl(session, "sandboxes");
+  }
+
+  /** `https://vercel.com/<team>/<project>/<section>`, or null without a slug. */
+  function vercelProjectUrl(
+    session: StoredSession,
+    section: string,
+  ): string | null {
     if (session.teamSlug === null || session.teamSlug === "") return null;
     const project = session.projectSlug ?? session.projectId;
     if (project === "") return null;
-    return `https://vercel.com/${encodeURIComponent(session.teamSlug)}/${encodeURIComponent(project)}/sandboxes`;
+    return `https://vercel.com/${encodeURIComponent(session.teamSlug)}/${encodeURIComponent(project)}/${section}`;
   }
 
   async function readRecords(): Promise<MachineRecord[]> {
@@ -1182,7 +1198,16 @@ export default async function plugin(bb: BbPluginApi) {
     machines_remove: async ({ name }) => ({
       removed: await removeMachineByName(name),
     }),
-    images_list: () => ({ images: listImages() }),
+    images_list: async () => {
+      const session = await readStoredSession();
+      return {
+        images: listImages(),
+        registryUrl:
+          session === null
+            ? null
+            : vercelProjectUrl(session, `images/${DEFAULT_REPOSITORY}`),
+      };
+    },
     images_create: () => {
       const now = Date.now();
       const id = randomUUID().slice(0, 8);

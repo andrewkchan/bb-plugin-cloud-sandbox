@@ -98,18 +98,29 @@ Images and their build logs live in the plugin's SQLite database rather than
 
 **Creating a machine** uses the image most recently used, changeable from the
 chevron beside the button; the dropdown also offers "No image" for Vercel's
-default managed image. The chevron is a picker, not an action menu — choosing
-an entry only changes what the button will do, and nothing is created until
-the button is pressed. The selection follows the server's default until the
-user picks one, so a background refresh cannot silently change what the button
-would create. Until an image has been built the button is replaced by
+default managed image, and is available whether or not any image exists. The
+chevron is a picker, not an action menu — choosing an entry only changes what
+the button will do, and nothing is created until the button is pressed. The
+selection follows the server's default until the user picks one, so a
+background refresh cannot silently change what the button would create.
+
+Deleting an image removes it and its build history from bb. The pushed tag
+stays in the container registry, which the image page's "Manage images on
+Vercel" link reaches. Until an image has been built the button is replaced by
 **Setup images**, which links to `#images` on this plugin's settings page —
 without one, a machine would install bb's prerequisites from scratch.
 
 Baking those prerequisites cuts enrolment from about **49s to 29s** measured
-between the `create.sandbox-ready` and `create.enrolled` debug events. The
-remaining time is mostly installing bb-app itself, which is not baked because
-the package is served by the bb server and has to match its version.
+between the `create.sandbox-ready` and `create.enrolled` debug events, so an
+image is a modest speedup rather than a prerequisite — machines can be created
+without one.
+
+The rest of the time cannot be baked away. Enrolment downloads a 37MB
+`bb-app.tgz` from the bb server (~24s over a connect tunnel) and installs it
+with native add-on builds (~15s), and `install.sh` deliberately reinstalls the
+server's own build every time: "version strings cannot distinguish unpublished
+builds, so an existing bb-app is trusted only when the server provides no
+package (404) or is unreachable."
 
 ## Building custom images
 
