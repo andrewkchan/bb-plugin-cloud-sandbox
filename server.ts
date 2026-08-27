@@ -727,8 +727,11 @@ export default async function plugin(bb: BbPluginApi) {
     lastFailure: typeof lastFailure;
   }> {
     const session = await ensureFreshSession();
+    // Anything that has ever built successfully can still create a machine.
+    // Keying this off status would strand a working image the moment a later
+    // rebuild failed, even though its published manifest is untouched.
     const readyImages = listImages()
-      .filter((image) => image.status === "ready" && image.imageRef !== null)
+      .filter((image) => image.imageRef !== null)
       .map((image) => ({ id: image.id, name: image.name }));
     const defaultImageId = await resolveDefaultImageId(readyImages);
 

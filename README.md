@@ -181,6 +181,14 @@ building native modules, so a new machine sits at `Connecting` for a while.
 
 ## Notes
 
+- Machines are created with `keepLastSnapshots: { count: 1 }`. Vercel appears
+  to keep one snapshot per sandbox anyway, so this states the invariant the
+  plugin relies on rather than saving anything; waking needs only the most
+  recent snapshot. Snapshot storage grows with the *number* of machines, not
+  with how often one is stopped, so deleting machines is what reclaims it.
+- An image can create machines whenever it has ever built successfully, which
+  is tracked by `imageRef` rather than by status. A failed rebuild leaves the
+  published manifest untouched, so it must not strand a working image.
 - Every run boots a fresh sandbox and stops it in a `finally` — a leaked
   sandbox keeps billing until its own timeout fires.
 - `auth.ts` implements the device grant directly rather than calling

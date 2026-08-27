@@ -152,6 +152,11 @@ export async function createMachine(options: {
     timeout: timeoutMs,
     ...(env === undefined || Object.keys(env).length === 0 ? {} : { env }),
     ...(image === undefined || image === "" ? {} : { image }),
+    // Vercel appears to keep one snapshot per sandbox already, so this is
+    // insurance rather than a saving: it states the invariant the plugin
+    // relies on instead of trusting an undocumented default. Waking needs
+    // only the most recent snapshot, and evicted ones are deleted at once.
+    keepLastSnapshots: { count: 1 },
     ...(vcpus === undefined ? {} : { resources: { vcpus } }),
     ...(signal === undefined ? {} : { signal }),
   });
