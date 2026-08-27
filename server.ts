@@ -794,7 +794,7 @@ export default async function plugin(bb: BbPluginApi) {
           hostId: record?.hostId ?? null,
           hostName: host?.name ?? null,
           state: "error" as const,
-          status: `Error (${sandbox.status})`,
+          status: `Error (sandbox ${sandbox.status})`,
           uptimeMs: null,
           createdAt: sandbox.createdAt,
           sessionStartedAt,

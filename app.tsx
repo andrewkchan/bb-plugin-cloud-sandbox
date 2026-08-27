@@ -525,7 +525,7 @@ function MachinesPage() {
                   ))}
                   {readyImages.length === 0 ? null : <DropdownMenuSeparator />}
                   <DropdownMenuRadioItem value="">
-                    No image (default sandbox)
+                    No image (Vercel default)
                   </DropdownMenuRadioItem>
                 </DropdownMenuRadioGroup>
                 <DropdownMenuSeparator />
@@ -650,8 +650,8 @@ function MachinesPage() {
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : machines.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No cloud machines yet. Each one is a Vercel Sandbox that joins bb as
-            a machine you can run threads on.
+            No cloud machines yet. Each one is a Vercel Sandbox that installs
+            bb and joins as a machine you can run threads on.
           </p>
         ) : (
           // Capped height with its own scroll so a long list cannot push the
@@ -1145,7 +1145,7 @@ function ImagesTab() {
       ) : images.length === 0 ? (
         <p className="text-muted-foreground">
           No images yet. An image bakes bb&apos;s prerequisites and your own
-          setup commands, so machines created from it start faster.
+          setup commands, so cloud machines created from it start faster.
         </p>
       ) : (
         <ul className="space-y-2">

@@ -1,9 +1,15 @@
 # bb-plugin-cloud-sandbox
 
-A bb plugin that turns [Vercel Sandboxes](https://vercel.com/docs/vercel-sandbox)
-into bb machines. Each "cloud machine" is a sandbox that installs bb and
-enrols itself over bb connect, so it appears alongside your local machines and
-can run threads. The interface is entirely graphical.
+**Cloud Machines** — spin up and manage cloud machines backed by
+[Vercel Sandboxes](https://vercel.com/docs/vercel-sandbox).
+
+Each cloud machine is a sandbox that installs bb and enrols itself over bb
+connect, so it appears alongside your local machines and can run threads. The
+interface is entirely graphical.
+
+The package name stays `bb-plugin-cloud-sandbox` because the plugin id derives
+from it; renaming would orphan the settings, secrets and database of every
+existing install.
 
 - **Cloud Machines page** — a table of machines with status, created and
   last-used times, sortable by name or either date and filterable by status.

@@ -7,8 +7,8 @@
     "bbPluginSdk": ">=0.4.22"
   },
   "bb": {
-    "name": "Cloud Sandbox",
-    "description": "Run code and commands in an isolated Vercel Sandbox microVM.",
+    "name": "Cloud Machines",
+    "description": "Spin up and manage cloud machines backed by Vercel Sandboxes.",
     "branding": {
       "icon": "Cloud"
     },
