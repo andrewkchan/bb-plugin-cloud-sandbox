@@ -1,6 +1,5 @@
 // Cloud machine lifecycle: a Vercel Sandbox that enrolls itself as a bb
-// machine and stays running, rather than a sandbox that runs one command and
-// stops.
+// machine and stays running.
 //
 // Like sandbox.ts and auth.ts this module carries no bb dependency; the
 // caller supplies the enrollment details it obtained from bb.

@@ -610,7 +610,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /**
-   * Forget the machine: delete the sandbox and its snapshots, drop its bb host
+   * Delete the sandbox and its snapshots, drop its bb host
    * registration, drop the local record, and hide the row. Nothing here is
    * reversible.
    */
