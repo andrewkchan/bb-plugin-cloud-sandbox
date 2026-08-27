@@ -531,6 +531,19 @@ function MachinesPage() {
                       No image (default sandbox)
                     </DropdownMenuRadioItem>
                   </DropdownMenuRadioGroup>
+                  <DropdownMenuSeparator />
+                  {/* Sits outside the radio group: this navigates away rather
+                      than changing the selection, and the icon says so. */}
+                  <DropdownMenuItem asChild>
+                    <UrlLink href={SETTINGS_IMAGES_HREF}>
+                      Configure images
+                      <Icon
+                        name="ExternalLink"
+                        className="ml-auto size-3.5 opacity-60"
+                        aria-hidden
+                      />
+                    </UrlLink>
+                  </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
@@ -720,9 +733,11 @@ function MachinesPage() {
 }
 
 
-const IMAGE_STATUS_STYLES: Record<PluginImage["status"], string> = {
-  ready: "bg-emerald-500",
-  building: "bg-amber-500",
+/** Ready is the expected state and carries no dot; the rest need attention. */
+const IMAGE_STATUS_STYLES: Record<
+  Exclude<PluginImage["status"], "ready" | "building">,
+  string
+> = {
   pending: "bg-muted-foreground/40",
   error: "bg-destructive",
 };
@@ -737,14 +752,13 @@ const IMAGE_STATUS_LABELS: Record<PluginImage["status"], string> = {
 function ImageStatus({ status }: { status: PluginImage["status"] }) {
   return (
     <span className="flex items-center gap-2 text-xs text-muted-foreground">
-      {status === "building" ? (
-        <Spinner className="size-3" />
-      ) : (
+      {status === "building" ? <Spinner className="size-3" /> : null}
+      {status === "pending" || status === "error" ? (
         <span
           aria-hidden
           className={cn("size-2 shrink-0 rounded-full", IMAGE_STATUS_STYLES[status])}
         />
-      )}
+      ) : null}
       {IMAGE_STATUS_LABELS[status]}
     </span>
   );
