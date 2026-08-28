@@ -1026,9 +1026,7 @@ function TemplateSecrets({ templateId }: { templateId: string }) {
     <div className="space-y-1.5">
       <label className="text-xs font-medium">Agent credentials</label>
       <p className="text-xs text-muted-foreground">
-        Injected into a machine&apos;s environment when it is created, not baked
-        into the image, so they never land in a layer anyone who can pull it
-        could read.
+        Credentials injected into a machine&apos;s environment when it is created.
       </p>
       <ul className="space-y-2">
         {providers.map((provider) => {
@@ -1194,10 +1192,7 @@ function TemplateDetail({
       <div className="space-y-1.5">
         <label className="text-xs font-medium">Environment variables</label>
         <p className="text-xs text-muted-foreground">
-          Baked into the image, so they are visible to anyone who can pull it.
-          Keep secrets out where you can; agent credentials for Claude Code are
-          injected per machine from the Agents tab instead. A row left blank is
-          only a reminder and is not written into the image.
+          Named values baked into the image.
         </p>
         {env.map((entry, index) => (
           <div key={index} className="flex items-center gap-2">
