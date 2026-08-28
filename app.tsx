@@ -61,8 +61,8 @@ const POLL_MS = 45_000;
  */
 let lastMachineSnapshot: {
   machines: MachineView[];
-  readyImages: { id: string; name: string }[];
-  defaultImageId: string | null;
+  readyTemplates: { id: string; name: string }[];
+  defaultTemplateId: string | null;
   vercelUrl: string | null;
   signedIn: boolean;
 } | null = null;
@@ -377,11 +377,11 @@ function MachinesPage() {
   const [vercelUrl, setVercelUrl] = useState<string | null>(
     () => lastMachineSnapshot?.vercelUrl ?? null,
   );
-  const [readyImages, setReadyImages] = useState<{ id: string; name: string }[]>(
-    () => lastMachineSnapshot?.readyImages ?? [],
+  const [readyTemplates, setReadyTemplates] = useState<{ id: string; name: string }[]>(
+    () => lastMachineSnapshot?.readyTemplates ?? [],
   );
-  const [defaultImageId, setDefaultImageId] = useState<string | null>(
-    () => lastMachineSnapshot?.defaultImageId ?? null,
+  const [defaultTemplateId, setDefaultTemplateId] = useState<string | null>(
+    () => lastMachineSnapshot?.defaultTemplateId ?? null,
   );
   // The chevron picks which image the button will use; it does not create.
   // Until the user picks, the selection follows the server's default so a
@@ -392,13 +392,13 @@ function MachinesPage() {
     status: number | null;
     at: number;
   } | null>(null);
-  const [pickedImageId, setPickedImageId] = useState<string | null>(null);
+  const [pickedTemplateId, setPickedTemplateId] = useState<string | null>(null);
   const [hasPicked, setHasPicked] = useState(false);
-  const selectedImageId = hasPicked ? pickedImageId : defaultImageId;
-  const selectedImageName =
-    selectedImageId === null
+  const selectedTemplateId = hasPicked ? pickedTemplateId : defaultTemplateId;
+  const selectedTemplateName =
+    selectedTemplateId === null
       ? "no image"
-      : (readyImages.find((image) => image.id === selectedImageId)?.name ??
+      : (readyTemplates.find((image) => image.id === selectedTemplateId)?.name ??
         "no image");
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
@@ -421,14 +421,14 @@ function MachinesPage() {
           setSignedIn(result.signedIn);
           setCreating(result.creating);
           setVercelUrl(result.vercelUrl);
-          setReadyImages(result.readyImages);
-          setDefaultImageId(result.defaultImageId);
+          setReadyTemplates(result.readyTemplates);
+          setDefaultTemplateId(result.defaultTemplateId);
           setLastFailure(result.lastFailure);
           setRefreshingInBackground(result.refreshing);
           lastMachineSnapshot = {
             machines: result.machines,
-            readyImages: result.readyImages,
-            defaultImageId: result.defaultImageId,
+            readyTemplates: result.readyTemplates,
+            defaultTemplateId: result.defaultTemplateId,
             vercelUrl: result.vercelUrl,
             signedIn: result.signedIn,
           };
@@ -456,10 +456,10 @@ function MachinesPage() {
 
   useRealtime("machines-changed", () => refetch());
 
-  const create = (imageId: string | null) => {
+  const create = (templateId: string | null) => {
     setCreating(true);
     setError(null);
-    rpc.call("machines_create", { imageId }).then(
+    rpc.call("machines_create", { templateId }).then(
       () => refetch(),
       (cause: unknown) => {
         setCreating(false);
@@ -546,7 +546,7 @@ function MachinesPage() {
             <Button
               size="sm"
               className="rounded-r-none"
-              onClick={() => create(selectedImageId)}
+              onClick={() => create(selectedTemplateId)}
               disabled={creating || !signedIn}
             >
               {creating ? (
@@ -556,7 +556,7 @@ function MachinesPage() {
               )}
               {creating
                 ? "Creating\u2026"
-                : `Create cloud machine (${selectedImageName})`}
+                : `Create cloud machine (${selectedTemplateName})`}
             </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -564,7 +564,7 @@ function MachinesPage() {
                   size="sm"
                   className="rounded-l-none border-l border-background/30 px-2"
                   disabled={creating || !signedIn}
-                  aria-label={`Change template, currently ${selectedImageName}`}
+                  aria-label={`Change template, currently ${selectedTemplateName}`}
                 >
                   {"\u25be"}
                 </Button>
@@ -573,18 +573,18 @@ function MachinesPage() {
                 {/* A radio group, not a list of actions: choosing an entry
                     only changes what the button will do. */}
                 <DropdownMenuRadioGroup
-                  value={selectedImageId ?? ""}
+                  value={selectedTemplateId ?? ""}
                   onValueChange={(value) => {
-                    setPickedImageId(value === "" ? null : value);
+                    setPickedTemplateId(value === "" ? null : value);
                     setHasPicked(true);
                   }}
                 >
-                  {readyImages.map((image) => (
+                  {readyTemplates.map((image) => (
                     <DropdownMenuRadioItem key={image.id} value={image.id}>
                       {image.name}
                     </DropdownMenuRadioItem>
                   ))}
-                  {readyImages.length === 0 ? null : <DropdownMenuSeparator />}
+                  {readyTemplates.length === 0 ? null : <DropdownMenuSeparator />}
                   <DropdownMenuRadioItem value="">
                     No template (Vercel default)
                   </DropdownMenuRadioItem>
@@ -783,7 +783,7 @@ function MachinesPage() {
                         </TableCell>
                         <TableCell>
                           <span className="text-xs text-muted-foreground">
-                            {machine.imageName ?? "—"}
+                            {machine.templateName ?? "—"}
                           </span>
                         </TableCell>
                         <TableCell>
@@ -878,7 +878,7 @@ function BuildLog({ build, onBack }: { build: PluginBuild; onBack: () => void })
 
   useEffect(refetch, [refetch]);
   // A running build appends to its log as it goes.
-  useRealtime("images-changed", () => {
+  useRealtime("templates-changed", () => {
     if (build.status === "building") refetch();
   });
 
@@ -1106,7 +1106,7 @@ function TemplateDetail({
   }, [rpc, template.id, report]);
 
   useEffect(refetchBuilds, [refetchBuilds]);
-  useRealtime("images-changed", refetchBuilds);
+  useRealtime("templates-changed", refetchBuilds);
 
   const save = () => {
     setBusy(true);
@@ -1350,7 +1350,7 @@ function TemplatesTab() {
   }, [rpc, report]);
 
   useEffect(refetch, [refetch]);
-  useRealtime("images-changed", refetch);
+  useRealtime("templates-changed", refetch);
 
   const createFrom = (presetId: string) => {
     rpc.call("templates_create", { presetId }).then((created) => {

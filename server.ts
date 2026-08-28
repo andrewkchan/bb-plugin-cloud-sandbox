@@ -34,16 +34,16 @@ import {
   DEFAULT_REPOSITORY,
   deleteImagesForTag,
   findPreset,
-  IMAGE_PRESETS,
+  TEMPLATE_PRESETS,
   pruneUntaggedImages,
-  type ImageEnvVar,
+  type TemplateEnvVar,
   type RegistryCleanupResult,
-} from "./images.js";
+} from "./templates.js";
 
 /** Debug events kept for troubleshooting. Bounded to stay under the kv cap. */
 const MAX_EVENTS = 200;
 const MACHINES_CHANGED = "machines-changed";
-const IMAGES_CHANGED = "images-changed";
+const TEMPLATES_CHANGED = "templates-changed";
 const AUTH_CHANGED = "auth-changed";
 const REFRESH_SKEW_MS = 60_000;
 
@@ -105,9 +105,9 @@ const machineRecordSchema = z.object({
   createdAt: z.number(),
   /** Epoch ms the machine was first observed to be no longer running. */
   disconnectedAt: z.number().nullable(),
-  /** The image this machine was created from, if any. */
-  imageId: z.string().nullable(),
-  imageName: z.string().nullable(),
+  /** The template this machine was created from, if any. */
+  templateId: z.string().nullable(),
+  templateName: z.string().nullable(),
 });
 type MachineRecord = z.infer<typeof machineRecordSchema>;
 
@@ -134,8 +134,8 @@ const machineViewSchema = z.object({
   lastUsedAt: z.number().nullable(),
   /** True while this machine is being woken. */
   waking: z.boolean(),
-  /** Name of the image this machine was created from, if any. */
-  imageName: z.string().nullable(),
+  /** Name of the template this machine was created from, if any. */
+  templateName: z.string().nullable(),
   error: z.string().nullable(),
 });
 export type MachineView = z.infer<typeof machineViewSchema>;
@@ -163,7 +163,7 @@ export type PluginTemplate = z.infer<typeof templateSchema>;
 
 const buildSchema = z.object({
   id: z.string(),
-  imageId: z.string(),
+  templateId: z.string(),
   status: z.enum(["building", "ready", "error"]),
   startedAt: z.number(),
   finishedAt: z.number().nullable(),
@@ -187,10 +187,10 @@ export const rpcContract = defineRpcContract({
       creating: z.boolean(),
       /** Deep link to this project's sandboxes on vercel.com, when derivable. */
       vercelUrl: z.string().nullable(),
-      /** Images that have been built, for the create button's picker. */
-      readyImages: z.array(z.object({ id: z.string(), name: z.string() })),
+      /** Templates that have been built, for the create button's picker. */
+      readyTemplates: z.array(z.object({ id: z.string(), name: z.string() })),
       /** Which of those the create button uses unless told otherwise. */
-      defaultImageId: z.string().nullable(),
+      defaultTemplateId: z.string().nullable(),
       /** When the returned data was actually fetched from Vercel. */
       fetchedAt: z.number(),
       /** True when this answer is stale and a refresh is already running. */
@@ -212,7 +212,7 @@ export const rpcContract = defineRpcContract({
     }),
   },
   machines_create: {
-    input: z.object({ imageId: z.string().nullable() }),
+    input: z.object({ templateId: z.string().nullable() }),
     output: z.object({ started: z.boolean() }),
   },
   /** Resume a stopped machine and bring its bb daemon back. */
@@ -407,6 +407,7 @@ export default async function plugin(bb: BbPluginApi) {
     // An image became a template: the OCI image is now one part of it,
     // alongside secrets injected when a machine is created.
     `ALTER TABLE images RENAME TO templates`,
+    `ALTER TABLE builds RENAME COLUMN image_id TO template_id`,
   ]);
 
   interface TemplateRow {
@@ -465,7 +466,7 @@ export default async function plugin(bb: BbPluginApi) {
       fields.lastError ?? null,
       id,
     );
-    bb.realtime.publish(IMAGES_CHANGED, {});
+    bb.realtime.publish(TEMPLATES_CHANGED, {});
   }
 
   /** Templates whose build is running in this plugin generation. */
@@ -845,18 +846,18 @@ export default async function plugin(bb: BbPluginApi) {
     signedIn: boolean;
     creating: boolean;
     vercelUrl: string | null;
-    readyImages: { id: string; name: string }[];
-    defaultImageId: string | null;
+    readyTemplates: { id: string; name: string }[];
+    defaultTemplateId: string | null;
     lastFailure: typeof lastFailure;
   }> {
     const session = await ensureFreshSession();
     // Anything that has ever built successfully can still create a machine.
     // Keying this off status would strand a working image the moment a later
     // rebuild failed, even though its published manifest is untouched.
-    const readyImages = listTemplates()
+    const readyTemplates = listTemplates()
       .filter((image) => image.imageRef !== null)
       .map((image) => ({ id: image.id, name: image.name }));
-    const defaultImageId = await resolveDefaultImageId(readyImages);
+    const defaultTemplateId = await resolveDefaultTemplateId(readyTemplates);
 
     if (session === null) {
       return {
@@ -864,8 +865,8 @@ export default async function plugin(bb: BbPluginApi) {
         signedIn: false,
         creating: creating.size > 0,
         vercelUrl: null,
-        readyImages,
-        defaultImageId,
+        readyTemplates,
+        defaultTemplateId,
         lastFailure,
       };
     }
@@ -923,7 +924,7 @@ export default async function plugin(bb: BbPluginApi) {
           sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
-          imageName: record?.imageName ?? null,
+          templateName: record?.templateName ?? null,
           error: `Sandbox ${sandbox.status}`,
         };
       }
@@ -939,7 +940,7 @@ export default async function plugin(bb: BbPluginApi) {
           sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
-          imageName: record?.imageName ?? null,
+          templateName: record?.templateName ?? null,
           error: null,
         };
       }
@@ -960,7 +961,7 @@ export default async function plugin(bb: BbPluginApi) {
           sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
-          imageName: record?.imageName ?? null,
+          templateName: record?.templateName ?? null,
           error: null,
         };
       }
@@ -975,7 +976,7 @@ export default async function plugin(bb: BbPluginApi) {
         sessionStartedAt,
         lastUsedAt,
         waking: waking.has(sandbox.name),
-        imageName: record?.imageName ?? null,
+        templateName: record?.templateName ?? null,
         error: null,
       };
     });
@@ -993,8 +994,8 @@ export default async function plugin(bb: BbPluginApi) {
       signedIn: true,
       creating: creating.size > 0,
       vercelUrl: buildVercelUrl(session),
-      readyImages,
-      defaultImageId,
+      readyTemplates,
+      defaultTemplateId,
       lastFailure,
     };
   }
@@ -1042,27 +1043,27 @@ export default async function plugin(bb: BbPluginApi) {
    * create a machine, falling back to the newest built image when that one is
    * gone or nothing has been created yet.
    */
-  async function resolveDefaultImageId(
-    readyImages: { id: string }[],
+  async function resolveDefaultTemplateId(
+    readyTemplates: { id: string }[],
   ): Promise<string | null> {
-    if (readyImages.length === 0) return null;
-    const last = await bb.storage.kv.get<string>("lastImageId");
+    if (readyTemplates.length === 0) return null;
+    const last = await bb.storage.kv.get<string>("lastTemplateId");
     if (
       typeof last === "string" &&
-      readyImages.some((image) => image.id === last)
+      readyTemplates.some((image) => image.id === last)
     ) {
       return last;
     }
-    return readyImages[0]?.id ?? null;
+    return readyTemplates[0]?.id ?? null;
   }
 
-  async function startCreate(imageId: string | null): Promise<boolean> {
+  async function startCreate(templateId: string | null): Promise<boolean> {
     const credentials = await requireCredentials();
     const values = await settings.get();
-    const template = imageId === null ? null : getTemplate(imageId);
-    if (imageId !== null && (template === null || template.imageRef === null)) {
+    const template = templateId === null ? null : getTemplate(templateId);
+    if (templateId !== null && (template === null || template.imageRef === null)) {
       throw new Error(
-        `Template ${imageId} has not been built, so no machine can be created from it.`,
+        `Template ${templateId} has not been built, so no machine can be created from it.`,
       );
     }
     const seconds = Number.parseInt(values.machineTimeoutSeconds, 10);
@@ -1088,7 +1089,7 @@ export default async function plugin(bb: BbPluginApi) {
         );
         // Remember the choice so the button defaults to it next time.
         if (template !== null)
-          await bb.storage.kv.set("lastImageId", template.id);
+          await bb.storage.kv.set("lastTemplateId", template.id);
         const enrollment = await mintEnrollment();
         const result = await createMachine({
           credentials,
@@ -1106,8 +1107,8 @@ export default async function plugin(bb: BbPluginApi) {
                 hostId: enrollment.hostId,
                 createdAt: Date.now(),
                 disconnectedAt: null,
-                imageId: template?.id ?? null,
-                imageName: template?.name ?? null,
+                templateId: template?.id ?? null,
+                templateName: template?.name ?? null,
               },
               ...(await readRecords()),
             ]);
@@ -1268,10 +1269,10 @@ export default async function plugin(bb: BbPluginApi) {
    * The log is written to the build row as it streams, so the UI can follow a
    * running build instead of waiting for the whole thing.
    */
-  async function startBuild(imageId: string): Promise<boolean> {
-    if (building.has(imageId)) return false;
-    const image = getTemplate(imageId);
-    if (image === null) throw new Error(`No image with id ${imageId}`);
+  async function startBuild(templateId: string): Promise<boolean> {
+    if (building.has(templateId)) return false;
+    const template = getTemplate(templateId);
+    if (template === null) throw new Error(`No template with id ${templateId}`);
 
     const session = await ensureFreshSession();
     if (session === null) {
@@ -1287,10 +1288,10 @@ export default async function plugin(bb: BbPluginApi) {
 
     const buildId = randomUUID().slice(0, 8);
     db.prepare(
-      "INSERT INTO builds (id, image_id, status, started_at, log) VALUES (?, ?, 'building', ?, '')",
-    ).run(buildId, imageId, Date.now());
-    building.add(imageId);
-    setTemplateStatus(imageId, "building", { lastError: null });
+      "INSERT INTO builds (id, template_id, status, started_at, log) VALUES (?, ?, 'building', ?, '')",
+    ).run(buildId, templateId, Date.now());
+    building.add(templateId);
+    setTemplateStatus(templateId, "building", { lastError: null });
 
     void (async () => {
       const appendLog = (chunk: string) => {
@@ -1298,7 +1299,7 @@ export default async function plugin(bb: BbPluginApi) {
           chunk,
           buildId,
         );
-        bb.realtime.publish(IMAGES_CHANGED, {});
+        bb.realtime.publish(TEMPLATES_CHANGED, {});
       };
       try {
         const result = await buildImage({
@@ -1309,18 +1310,18 @@ export default async function plugin(bb: BbPluginApi) {
           },
           teamSlug: session.teamSlug!,
           projectId: session.projectId,
-          // The tag is the image id, so rebuilding replaces the image in place
-          // rather than accumulating tags nobody can tell apart.
-          tag: image.id,
-          commands: image.commands,
-          env: image.env as ImageEnvVar[],
+          // The tag is the template id, so rebuilding replaces its image in
+          // place rather than accumulating tags nobody can tell apart.
+          tag: template.id,
+          commands: template.commands,
+          env: template.env as TemplateEnvVar[],
           onLog: appendLog,
         });
         db.prepare(
           "UPDATE builds SET status = 'ready', finished_at = ?, image_ref = ? WHERE id = ?",
         ).run(Date.now(), result.imageRef, buildId);
-        setTemplateStatus(imageId, "ready", { imageRef: result.imageRef });
-        bb.log.info(`image ${image.name} built as ${result.imageRef}`);
+        setTemplateStatus(templateId, "ready", { imageRef: result.imageRef });
+        bb.log.info(`template ${template.name} built its image as ${result.imageRef}`);
         // Rebuilding a tag leaves the manifest it replaced untagged and full
         // size, so only the latest hash for each image is kept.
         await recordCleanup("prune after build", pruneUntaggedImages);
@@ -1329,11 +1330,11 @@ export default async function plugin(bb: BbPluginApi) {
         db.prepare(
           "UPDATE builds SET status = 'error', finished_at = ?, error = ? WHERE id = ?",
         ).run(Date.now(), message, buildId);
-        setTemplateStatus(imageId, "error", { lastError: message });
-        bb.log.warn(`image ${image.name} build failed: ${message}`);
+        setTemplateStatus(templateId, "error", { lastError: message });
+        bb.log.warn(`template ${template.name} build failed: ${message}`);
       } finally {
-        building.delete(imageId);
-        bb.realtime.publish(IMAGES_CHANGED, {});
+        building.delete(templateId);
+        bb.realtime.publish(TEMPLATES_CHANGED, {});
       }
     })();
     return true;
@@ -1349,8 +1350,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
     auth_sign_out: () => signOut(),
     machines_list: ({ force }) => readMachines(force),
-    machines_create: async ({ imageId }) => ({
-      started: await startCreate(imageId),
+    machines_create: async ({ templateId }) => ({
+      started: await startCreate(templateId),
     }),
     machines_wake: async ({ name }) => ({ started: await startWake(name) }),
     machines_dismiss_failure: () => {
@@ -1368,7 +1369,7 @@ export default async function plugin(bb: BbPluginApi) {
       const session = await readStoredSession();
       return {
         templates: listTemplates(),
-        presets: IMAGE_PRESETS.map(({ id, label, description }) => ({
+        presets: TEMPLATE_PRESETS.map(({ id, label, description }) => ({
           id,
           label,
           description,
@@ -1400,7 +1401,7 @@ export default async function plugin(bb: BbPluginApi) {
         now,
         now,
       );
-      bb.realtime.publish(IMAGES_CHANGED, {});
+      bb.realtime.publish(TEMPLATES_CHANGED, {});
       const created = getTemplate(id);
       if (created === null) throw new Error("Image was not created.");
       return created;
@@ -1417,17 +1418,17 @@ export default async function plugin(bb: BbPluginApi) {
         Date.now(),
         id,
       );
-      bb.realtime.publish(IMAGES_CHANGED, {});
+      bb.realtime.publish(TEMPLATES_CHANGED, {});
       const updated = getTemplate(id);
       if (updated === null) throw new Error(`No image with id ${id}`);
       return updated;
     },
     templates_delete: async ({ id }) => {
-      db.prepare("DELETE FROM builds WHERE image_id = ?").run(id);
+      db.prepare("DELETE FROM builds WHERE template_id = ?").run(id);
       const result = db.prepare("DELETE FROM templates WHERE id = ?").run(id);
       // A template's secrets have no meaning without it.
       await writeSecrets(id, {});
-      bb.realtime.publish(IMAGES_CHANGED, {});
+      bb.realtime.publish(TEMPLATES_CHANGED, {});
       // The tag is the image id, so this removes exactly this image's
       // manifest; the prune then catches anything it superseded.
       await recordCleanup("delete image from registry", (credentials) =>
@@ -1458,13 +1459,13 @@ export default async function plugin(bb: BbPluginApi) {
     builds_list: ({ templateId }) => ({
       builds: db
         .prepare(
-          "SELECT id, image_id, status, started_at, finished_at, image_ref, error FROM builds WHERE image_id = ? ORDER BY started_at DESC LIMIT 50",
+          "SELECT id, template_id, status, started_at, finished_at, image_ref, error FROM builds WHERE template_id = ? ORDER BY started_at DESC LIMIT 50",
         )
         .all(templateId)
         .map((row) => {
           const build = row as {
             id: string;
-            image_id: string;
+            template_id: string;
             status: string;
             started_at: number;
             finished_at: number | null;
@@ -1473,7 +1474,7 @@ export default async function plugin(bb: BbPluginApi) {
           };
           return {
             id: build.id,
-            imageId: build.image_id,
+            templateId: build.template_id,
             status: build.status as PluginBuild["status"],
             startedAt: build.started_at,
             finishedAt: build.finished_at,

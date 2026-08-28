@@ -1,9 +1,12 @@
-// Custom machine images.
+// Templates: what a cloud machine is made of.
 //
-// Vercel Sandbox boots from OCI images in Vercel Container Registry, and
-// nothing in the SDK builds one: `vercel vcr build`/`push` shell out to
-// docker, podman or buildah. Rather than require a container engine on the bb
-// host, a build runs inside a throwaway sandbox that installs buildah itself.
+// A template's image is an OCI image in Vercel Container Registry, and nothing
+// in the SDK builds one: `vercel vcr build`/`push` shell out to docker, podman
+// or buildah. Rather than require a container engine on the bb host, a build
+// runs inside a throwaway sandbox that installs buildah itself.
+//
+// "image" is used below only where it means that OCI artifact; the plugin
+// concept that owns it is a template.
 //
 // Like machines.ts and auth.ts this module carries no bb dependency.
 import { Sandbox } from "@vercel/sandbox";
@@ -34,17 +37,17 @@ export const BASE_IMAGE = "docker.io/library/ubuntu:26.04";
  * image; it is ordinary editable configuration afterwards, not a link that
  * keeps updating.
  */
-export interface ImagePreset {
+export interface TemplatePreset {
   id: string;
   label: string;
   description: string;
   name: string;
   commands: string;
   /** Seeded with empty values: names act as a checklist to fill in. */
-  env: ImageEnvVar[];
+  env: TemplateEnvVar[];
 }
 
-export const IMAGE_PRESETS: ImagePreset[] = [
+export const TEMPLATE_PRESETS: TemplatePreset[] = [
   {
     id: "blank",
     label: "Blank",
@@ -72,12 +75,12 @@ export const IMAGE_PRESETS: ImagePreset[] = [
   },
 ];
 
-export function findPreset(id: string): ImagePreset | null {
-  return IMAGE_PRESETS.find((preset) => preset.id === id) ?? null;
+export function findPreset(id: string): TemplatePreset | null {
+  return TEMPLATE_PRESETS.find((preset) => preset.id === id) ?? null;
 }
 
-/** A build-time environment variable baked into the image. */
-export interface ImageEnvVar {
+/** A build-time environment variable baked into a template's image. */
+export interface TemplateEnvVar {
   key: string;
   value: string;
 }
@@ -92,7 +95,7 @@ export interface BuildImageOptions {
   tag: string;
   /** Shell run after bb's prerequisites are installed. May be empty. */
   commands: string;
-  env: ImageEnvVar[];
+  env: TemplateEnvVar[];
   /** How long the build sandbox may live. */
   timeoutMs?: number;
   vcpus?: number;
@@ -110,7 +113,7 @@ export interface BuildImageResult {
 }
 
 /** Reject anything that could break out of the Dockerfile's ENV lines. */
-function assertSafeEnv(env: ImageEnvVar[]): void {
+function assertSafeEnv(env: TemplateEnvVar[]): void {
   for (const { key, value } of env) {
     if (value === "") continue;
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
@@ -133,7 +136,7 @@ function assertSafeEnv(env: ImageEnvVar[]): void {
  * Custom env vars are declared before the custom commands so those commands
  * can use them, and they persist into the running machine.
  */
-export function buildDockerfile(commands: string, env: ImageEnvVar[]): string {
+export function buildDockerfile(commands: string, env: TemplateEnvVar[]): string {
   assertSafeEnv(env);
   const lines = [
     `FROM ${BASE_IMAGE}`,

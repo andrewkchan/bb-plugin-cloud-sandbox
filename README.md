@@ -73,10 +73,12 @@ bb plugin logs cloud-sandbox -f
 
 | File | Role |
 | --- | --- |
-| `machines.ts` | Cloud machine lifecycle: create, enrol, list, stop, delete. No bb dependency. |
+| `machines.ts` | Cloud machine lifecycle: create, enrol, list, stop, wake, delete. No bb dependency. |
+| `templates.ts` | Template presets, the Dockerfile, the image build, and registry cleanup. No bb dependency. |
+| `agents.ts` | Agent providers and the credentials each one reads. No bb dependency. |
 | `auth.ts` | Vercel OAuth device authorization (RFC 8628). No bb dependency. |
-| `server.ts` | Settings, RPC, sign-in orchestration, machine state, debug log. |
-| `app.tsx` | The Cloud Machines page and the Vercel account settings section. |
+| `server.ts` | Settings, RPC, sign-in orchestration, template and machine state, debug log. |
+| `app.tsx` | The Cloud Machines page and the settings tabs. |
 
 ## Agent credentials
 
@@ -247,6 +249,10 @@ building native modules, so a new machine sits at `Connecting` for a while.
 - `inferScope` is called with `cwd` pinned to a temp directory. It otherwise
   reads `.vercel/project.json` relative to `process.cwd()` — wherever the bb
   server was launched — and could silently adopt an unrelated linked project.
+- "image" survives in the code only where it means the OCI artifact a template
+  builds — `imageRef`, `buildImage`, the registry helpers — and in migration
+  SQL, which has to keep naming the columns it originally created. Everything
+  that means the plugin concept is a template.
 - The debug log is capped at 200 events to stay under the 256KB
   `bb.storage.kv` value cap. Nothing reads it to make decisions; it exists to
   answer "what did this plugin ask Vercel and bb to do, and when".
