@@ -4,6 +4,9 @@
 // Like auth.ts this module carries no bb dependency; the caller supplies the
 // enrollment details it obtained from bb.
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { APIError, Sandbox, Snapshot } from "@vercel/sandbox";
 
 /**
@@ -74,38 +77,36 @@ export interface MachineSandbox {
 }
 
 /**
- * The script a fresh sandbox runs to become a bb machine.
- *
- * Three things here are not obvious and were each found by watching a real
- * enrollment fail:
- *
- * 1. `build-essential` — the Vercel universal image ships Node but no C
- *    toolchain, and bb-app's node-pty dependency is a native add-on that npm
- *    compiles from source. Without it the install dies at `not found: make`.
- * 2. `BB_INSTALL_SKIP_SERVICE=1` — the installer's last step registers a
- *    systemd user service, and containers have no systemd (`systemctl: not
- *    found`). This flag leaves the already-joined daemon running as a plain
- *    nohup'd process instead, which is what we want in a disposable VM.
- * 3. The server URL must be the bb connect tunnel URL, not a loopback
- *    address — the sandbox is on the public internet and cannot reach
- *    127.0.0.1.
+ * Read one of the shell scripts a machine runs. They are real files under
+ * scripts/ so they can be linted and read on their own; bb loads this plugin
+ * either from source or from dist/server.js, so find the plugin root by its
+ * package.json rather than guessing how deep this module sits.
  */
-export function buildEnrollmentScript(details: EnrollmentDetails): string {
-  const { joinCode, hostId, serverUrl, machineCode } = details;
-  return [
-    "set -e",
-    // A custom image already carries these, and reinstalling them is most of
-    // what makes enrolling onto a bare sandbox slow.
-    'if command -v make >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then',
-    '  echo "prerequisites already present; skipping apt"',
-    "else",
-    "  sudo apt-get update -qq",
-    "  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential >/dev/null 2>&1",
-    "fi",
-    "export BB_INSTALL_SKIP_SERVICE=1",
-    `curl -fL --connect-timeout 10 --max-time 60 --retry 2 ${serverUrl}/install.sh | sh -s -- --join-code ${joinCode} --host-id ${hostId} --server ${serverUrl} --machine-code ${machineCode}`,
-  ].join("\n");
+function readScript(name: string): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(join(dir, "package.json"))) {
+    const parent = dirname(dir);
+    if (parent === dir) throw new Error(`cannot locate scripts/${name}`);
+    dir = parent;
+  }
+  return readFileSync(join(dir, "scripts", name), "utf8");
 }
+
+/**
+ * The helpers, carrying the supervisor they install. Prepended to each entry
+ * script: only one file is sent to the sandbox, so there is nothing to source.
+ * A replacer function keeps `$$` in the supervisor from being read as a
+ * replacement pattern.
+ */
+const SHELL_LIB = readScript("lib.sh").replace(
+  "__DAEMON_SUPERVISOR__\n",
+  () => readScript("daemon-supervisor.sh"),
+);
+
+/** Enrollment takes its join code, host id, server URL and machine code as arguments. */
+export const ENROLLMENT_SCRIPT = `${SHELL_LIB}\n${readScript("enroll.sh")}`;
+
+export const WAKE_SCRIPT = `${SHELL_LIB}\n${readScript("wake.sh")}`;
 
 /**
  * Create a sandbox that stays running and enroll it as a bb machine.
@@ -166,7 +167,15 @@ export async function createMachine(options: {
 
     const finished = await sandbox.runCommand({
       cmd: "bash",
-      args: ["-lc", buildEnrollmentScript(enrollment)],
+      args: [
+        "-lc",
+        ENROLLMENT_SCRIPT,
+        "bb-enroll",
+        enrollment.joinCode,
+        enrollment.hostId,
+        enrollment.serverUrl,
+        enrollment.machineCode,
+      ],
       // Enrollment installs a compiler and builds native modules; on a cold
       // image this runs into minutes.
       timeoutMs: Math.min(timeoutMs, 20 * 60_000),
@@ -292,45 +301,6 @@ export async function deleteSandboxWithSnapshots(
   return { snapshotsDeleted, snapshotFailures };
 }
 
-/**
- * Bring a stopped machine back.
- *
- * Resuming restores the microVM from its snapshot, and because that snapshot
- * carries memory as well as disk, the host daemon usually comes back running
- * on its own — with the same hostId, since the durable credentials in
- * ~/.bb-machines survive too. This script is the belt-and-braces half: it
- * relaunches the daemon only if the restore did not bring it back, so a cold
- * disk-only restore still reconnects.
- *
- * Everything it needs is already on disk. The data directory is discovered
- * rather than derived from a server URL, because bb connect can mint a
- * different tunnel URL than the one the machine originally enrolled against.
- */
-export function buildWakeScript(): string {
-  // Liveness is checked against the daemon's own /status endpoint, the same
-  // signal bb's installer waits on. Matching on a process name would be wrong
-  // here: `pgrep -f "bb-app host-daemon"` also matches the shell running this
-  // script, because the pattern appears in its own command line, so it always
-  // reports a running daemon and the relaunch below never happens.
-  const isConnected = `curl -sf --max-time 2 "http://127.0.0.1:$PORT/status" 2>/dev/null | grep -q '"connected"[[:space:]]*:[[:space:]]*true'`;
-  return [
-    "set -e",
-    'DATA=$(find "$HOME/.bb-machines" -maxdepth 1 -mindepth 1 -type d ! -name host-daemon-ports | head -1)',
-    '[ -n "$DATA" ] || { echo "no bb enrollment found in this sandbox"; exit 1; }',
-    'PORT=$(cat "$DATA/host-daemon-port" 2>/dev/null || echo 38888)',
-    `SERVER=$(node -e 'console.log(require(process.argv[1]).serverUrl)' "$DATA/config.json")`,
-    `if ${isConnected}; then echo "daemon already connected"; exit 0; fi`,
-    'BB_APP_NPM_PREFIX="$DATA/npm" BB_DATA_DIR="$DATA" nohup "$DATA/npm/bin/bb-app" host-daemon --auto-update --host-daemon-port "$PORT" --server-url "$SERVER" >> "$DATA/wake.log" 2>&1 &',
-    // Return only once the machine is genuinely usable again, not merely
-    // once a process has been spawned.
-    "i=0",
-    "while [ $i -lt 60 ]; do",
-    `  if ${isConnected}; then echo "daemon reconnected"; exit 0; fi`,
-    "  i=$((i+1)); sleep 2",
-    "done",
-    'echo "daemon did not reconnect; see $DATA/wake.log"; exit 1',
-  ].join("\n");
-}
 
 /**
  * Resume a stopped machine and make sure its bb daemon is running again.
@@ -351,7 +321,7 @@ export async function wakeMachine(
   });
   const finished = await sandbox.runCommand({
     cmd: "bash",
-    args: ["-lc", buildWakeScript()],
+    args: ["-lc", WAKE_SCRIPT],
     timeoutMs: 5 * 60_000,
     ...(signal === undefined ? {} : { signal }),
   });

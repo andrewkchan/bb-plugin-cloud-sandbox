@@ -58,6 +58,7 @@ bb plugin logs cloud-sandbox -f
 | File | Role |
 | --- | --- |
 | `machines.ts` | Cloud machine lifecycle: create, enrol, list, stop, wake, delete. No bb dependency. |
+| `scripts/*.sh` | What a machine runs on itself: enrolment, wake, and the daemon supervisor that stands in for the service manager a container has none of. |
 | `templates.ts` | Template presets, the Dockerfile, the image build, and registry cleanup. No bb dependency. |
 | `agents.ts` | Agent providers and the credentials each one reads. No bb dependency. |
 | `auth.ts` | Vercel OAuth device authorization (RFC 8628). No bb dependency. |

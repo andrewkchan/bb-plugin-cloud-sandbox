@@ -53,6 +53,7 @@
   },
   "scripts": {
     "build": "bb plugin build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint:shell": "shellcheck -s sh scripts/*.sh"
   }
 }
