@@ -33,9 +33,8 @@ export const BASE_IMAGE = "docker.io/library/ubuntu:26.04";
 /**
  * Starting points offered when creating an image.
  *
- * A preset only seeds the name, commands and environment variables of a new
- * image; it is ordinary editable configuration afterwards, not a link that
- * keeps updating.
+ * A preset only seeds the name and commands of a new image; it is ordinary
+ * editable configuration afterwards, not a link that keeps updating.
  */
 export interface TemplatePreset {
   id: string;
@@ -43,8 +42,6 @@ export interface TemplatePreset {
   description: string;
   name: string;
   commands: string;
-  /** Seeded with empty values: names act as a checklist to fill in. */
-  env: TemplateEnvVar[];
 }
 
 export const TEMPLATE_PRESETS: TemplatePreset[] = [
@@ -54,7 +51,6 @@ export const TEMPLATE_PRESETS: TemplatePreset[] = [
     description: "bb's prerequisites only.",
     name: "Image",
     commands: "",
-    env: [],
   },
   {
     id: "claude-code",
@@ -62,7 +58,6 @@ export const TEMPLATE_PRESETS: TemplatePreset[] = [
     description: "Installs the Claude Code CLI.",
     name: "Claude Code",
     commands: "npm install -g @anthropic-ai/claude-code",
-    env: [],
   },
   {
     id: "pi",
@@ -71,18 +66,11 @@ export const TEMPLATE_PRESETS: TemplatePreset[] = [
     name: "pi.dev",
     // --ignore-scripts is what pi's own install instructions use.
     commands: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
-    env: [],
   },
 ];
 
 export function findPreset(id: string): TemplatePreset | null {
   return TEMPLATE_PRESETS.find((preset) => preset.id === id) ?? null;
-}
-
-/** A build-time environment variable baked into a template's image. */
-export interface TemplateEnvVar {
-  key: string;
-  value: string;
 }
 
 export interface BuildImageOptions {
@@ -95,7 +83,6 @@ export interface BuildImageOptions {
   tag: string;
   /** Shell run after bb's prerequisites are installed. May be empty. */
   commands: string;
-  env: TemplateEnvVar[];
   /** How long the build sandbox may live. */
   timeoutMs?: number;
   vcpus?: number;
@@ -112,15 +99,14 @@ export interface BuildImageResult {
   log: string;
 }
 
-/** Reject anything that could break out of the Dockerfile's ENV lines. */
-function assertSafeEnv(env: TemplateEnvVar[]): void {
-  for (const { key, value } of env) {
-    if (value === "") continue;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-      throw new Error(
-        `Invalid environment variable name "${key}". Use letters, digits and underscores, not starting with a digit.`,
-      );
-    }
+/**
+ * Reject a name the shell could not export.
+ */
+export function assertSafeEnvKey(key: string): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    throw new Error(
+      `Invalid environment variable name "${key}". Use letters, digits and underscores, not starting with a digit.`,
+    );
   }
 }
 
@@ -133,11 +119,10 @@ function assertSafeEnv(env: TemplateEnvVar[]): void {
  * from source at enrolment. Baking these is most of what makes a machine
  * created from a custom image faster than one built from scratch.
  *
- * Custom env vars are declared before the custom commands so those commands
- * can use them, and they persist into the running machine.
+ * Note build commands cannot see template env vars, which are instead injected
+ * at sandbox creation time.
  */
-export function buildDockerfile(commands: string, env: TemplateEnvVar[]): string {
-  assertSafeEnv(env);
+export function buildDockerfile(commands: string): string {
   const lines = [
     `FROM ${BASE_IMAGE}`,
     "ENV DEBIAN_FRONTEND=noninteractive",
@@ -148,14 +133,6 @@ export function buildDockerfile(commands: string, env: TemplateEnvVar[]): string
       "apt-get install -y -qq nodejs && " +
       "rm -rf /var/lib/apt/lists/*",
   ];
-  for (const { key, value } of env) {
-    // A row left blank is a checklist entry, not a variable. Emitting
-    // ENV KEY="" would bake an empty string that shadows whatever the machine
-    // is given at runtime.
-    if (value === "") continue;
-    // JSON.stringify gives correctly escaped Dockerfile quoting.
-    lines.push(`ENV ${key}=${JSON.stringify(value)}`);
-  }
   const trimmed = commands.trim();
   if (trimmed !== "") {
     // Run the user's script as one layer through a heredoc, so multi-line
@@ -185,7 +162,6 @@ export async function buildImage(
     projectId,
     tag,
     commands,
-    env,
     timeoutMs = 30 * 60_000,
     vcpus = 4,
     signal,
@@ -193,7 +169,7 @@ export async function buildImage(
   } = options;
 
   const registryRef = `${REGISTRY_HOST}/${teamSlug}/${projectId}/${DEFAULT_REPOSITORY}:${tag}`;
-  const dockerfile = buildDockerfile(commands, env);
+  const dockerfile = buildDockerfile(commands);
 
   const sandbox = await Sandbox.create({
     ...credentials,

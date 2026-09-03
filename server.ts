@@ -28,15 +28,15 @@ import {
   type EnrollmentDetails,
   type SandboxCredentials,
 } from "./machines.js";
-import { AGENT_PROVIDERS, isKnownCredentialKey } from "./agents.js";
+import { AGENT_PROVIDERS } from "./agents.js";
 import {
+  assertSafeEnvKey,
   buildImage,
   DEFAULT_REPOSITORY,
   deleteImagesForTag,
   findPreset,
   TEMPLATE_PRESETS,
   pruneUntaggedImages,
-  type TemplateEnvVar,
   type RegistryCleanupResult,
 } from "./templates.js";
 
@@ -142,16 +142,10 @@ export type MachineView = z.infer<typeof machineViewSchema>;
 
 const templateStatusSchema = z.enum(["pending", "building", "ready", "error"]);
 
-const envVarSchema = z.object({
-  key: z.string().min(1).max(200),
-  value: z.string().max(10_000),
-});
-
 const templateSchema = z.object({
   id: z.string(),
   name: z.string(),
   commands: z.string(),
-  env: z.array(envVarSchema),
   status: templateStatusSchema,
   /** Reference to pass to Sandbox.create, once a build has succeeded. */
   imageRef: z.string().nullable(),
@@ -259,7 +253,6 @@ export const rpcContract = defineRpcContract({
       id: z.string(),
       name: z.string().min(1).max(80).optional(),
       commands: z.string().max(50_000).optional(),
-      env: z.array(envVarSchema).max(100).optional(),
     }),
     output: templateSchema,
   },
@@ -342,14 +335,14 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Machine lifetime (seconds; max 2700 on Hobby, 86400 on Pro)",
       default: "2700",
     },
-    // Secrets a template injects when a machine is created, as JSON keyed by
-    // template id. They live in a secret setting so they land in the plugin's
-    // 0600 secrets directory rather than its database, and they are injected
-    // per machine rather than baked into an image, so a credential never ends
-    // up in a layer anyone who can pull the image could read.
+    // The environment a template injects when a machine is created, as JSON
+    // keyed by template id. It lives in a secret setting so it lands in the
+    // plugin's 0600 secrets directory rather than its database, and it is
+    // injected per machine rather than built into an image, so a credential
+    // never ends up in a layer anyone who can pull the image could read.
     templateSecrets: {
       type: "string",
-      label: "Template secrets (managed by the Templates tab)",
+      label: "Template environment (managed by the Templates tab)",
       secret: true,
     },
     machineVcpus: {
@@ -408,13 +401,14 @@ export default async function plugin(bb: BbPluginApi) {
     // alongside secrets injected when a machine is created.
     `ALTER TABLE images RENAME TO templates`,
     `ALTER TABLE builds RENAME COLUMN image_id TO template_id`,
+    // Table is deprecated, env vars no longer live in the image.
+    `ALTER TABLE templates DROP COLUMN env`,
   ]);
 
   interface TemplateRow {
     id: string;
     name: string;
     commands: string;
-    env: string;
     status: string;
     image_ref: string | null;
     last_error: string | null;
@@ -423,12 +417,10 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function toTemplate(row: TemplateRow): PluginTemplate {
-    const parsed = z.array(envVarSchema).safeParse(JSON.parse(row.env));
     return {
       id: row.id,
       name: row.name,
       commands: row.commands,
-      env: parsed.success ? parsed.data : [],
       status: templateStatusSchema.parse(row.status),
       imageRef: row.image_ref,
       lastError: row.last_error,
@@ -1028,9 +1020,9 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /**
-   * Secrets a template hands to its machines at creation.
+   * The environment a template hands to its machines at creation.
    *
-   * These are environment variables on the sandbox rather than anything baked
+   * These are environment variables on the sandbox rather than anything built
    * into its image: an image is a shared artifact that anyone able to pull it
    * can read, so a long-lived credential must not end up in one of its layers.
    */
@@ -1314,7 +1306,6 @@ export default async function plugin(bb: BbPluginApi) {
           // place rather than accumulating tags nobody can tell apart.
           tag: template.id,
           commands: template.commands,
-          env: template.env as TemplateEnvVar[],
           onLog: appendLog,
         });
         db.prepare(
@@ -1391,13 +1382,12 @@ export default async function plugin(bb: BbPluginApi) {
       // A preset only seeds the row; it is ordinary editable configuration
       // from here, not a link that keeps updating.
       db.prepare(
-        `INSERT INTO templates (id, name, commands, env, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+        `INSERT INTO templates (id, name, commands, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'pending', ?, ?)`,
       ).run(
         id,
         count === 0 ? preset.name : `${preset.name} ${count + 1}`,
         preset.commands,
-        JSON.stringify(preset.env),
         now,
         now,
       );
@@ -1406,18 +1396,12 @@ export default async function plugin(bb: BbPluginApi) {
       if (created === null) throw new Error("Image was not created.");
       return created;
     },
-    templates_update: ({ id, name, commands, env }) => {
+    templates_update: ({ id, name, commands }) => {
       const existing = getTemplate(id);
       if (existing === null) throw new Error(`No image with id ${id}`);
       db.prepare(
-        `UPDATE templates SET name = ?, commands = ?, env = ?, updated_at = ? WHERE id = ?`,
-      ).run(
-        name ?? existing.name,
-        commands ?? existing.commands,
-        JSON.stringify(env ?? existing.env),
-        Date.now(),
-        id,
-      );
+        `UPDATE templates SET name = ?, commands = ?, updated_at = ? WHERE id = ?`,
+      ).run(name ?? existing.name, commands ?? existing.commands, Date.now(), id);
       bb.realtime.publish(TEMPLATES_CHANGED, {});
       const updated = getTemplate(id);
       if (updated === null) throw new Error(`No image with id ${id}`);
@@ -1443,13 +1427,10 @@ export default async function plugin(bb: BbPluginApi) {
       keys: Object.keys(await readSecrets(templateId)).sort(),
     }),
     templates_set_secret: async ({ templateId, key, value }) => {
-      // Only credentials a supported provider actually reads; an arbitrary
-      // key would be stored and injected while nothing ever consumed it.
-      if (!isKnownCredentialKey(key)) {
-        throw new Error(
-          `"${key}" is not a credential any agent provider reads.`,
-        );
-      }
+      // Any name a shell can export: this store holds both the agent
+      // credentials the providers list and whatever else a template needs in
+      // its machines' environment.
+      assertSafeEnvKey(key);
       const secrets = await readSecrets(templateId);
       if (value.trim() === "") delete secrets[key];
       else secrets[key] = value.trim();

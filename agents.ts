@@ -4,7 +4,7 @@
 // machine's environment when it is created, so they never enter an image
 // layer that anyone able to pull the image could read.
 //
-// Like machines.ts and images.ts this module carries no bb dependency.
+// Like machines.ts and templates.ts this module carries no bb dependency.
 
 /** One credential an agent provider reads from the environment. */
 export interface AgentCredential {
@@ -60,10 +60,3 @@ export const AGENT_PROVIDERS: AgentProvider[] = [
     ],
   },
 ];
-
-/** Every key any provider recognises, for validating what may be stored. */
-export function isKnownCredentialKey(key: string): boolean {
-  return AGENT_PROVIDERS.some((provider) =>
-    provider.credentials.some((credential) => credential.key === key),
-  );
-}

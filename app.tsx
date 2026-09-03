@@ -899,14 +899,13 @@ function BuildLog({ build, onBack }: { build: PluginBuild; onBack: () => void })
 }
 
 /**
- * Credentials a template injects when a machine is created, by provider.
+ * Everything a template injects into a machine's environment when it is
+ * created: the agent credentials each provider reads, and other env vars.
  *
- * Deliberately separate from the build-time variables above: those are baked
- * into the image and readable by anyone who can pull it, while these never
- * enter a layer. Write-only from here — the backend reports which keys are
- * set and never returns a value.
+ * Write-only: the backend reports which keys are set and never returns a
+ * value.
  */
-function TemplateSecrets({ templateId }: { templateId: string }) {
+function TemplateEnvironment({ templateId }: { templateId: string }) {
   const rpc = useRpc<typeof rpcContract>();
   const [providers, setProviders] = useState<
     {
@@ -921,6 +920,8 @@ function TemplateSecrets({ templateId }: { templateId: string }) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [newKey, setNewKey] = useState("");
+  const [newValue, setNewValue] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const report = useCallback((cause: unknown) => {
@@ -955,6 +956,12 @@ function TemplateSecrets({ templateId }: { templateId: string }) {
     provider.credentials.filter((c) => isSet(c.key)).length;
 
   const open = providers.find((provider) => provider.id === openId) ?? null;
+  // Everything the providers above do not already own is a variable the user
+  // added themselves, and belongs in the second section.
+  const providerKeys = new Set(
+    providers.flatMap((provider) => provider.credentials.map((c) => c.key)),
+  );
+  const customKeys = (keys ?? []).filter((key) => !providerKeys.has(key));
 
   if (open !== null) {
     return (
@@ -1023,46 +1030,133 @@ function TemplateSecrets({ templateId }: { templateId: string }) {
   }
 
   return (
-    <div className="space-y-1.5">
-      <label className="text-xs font-medium">Agent credentials</label>
-      <p className="text-xs text-muted-foreground">
-        Credentials injected into a machine&apos;s environment when it is created.
-      </p>
-      <ul className="space-y-2">
-        {providers.map((provider) => {
-          const count = configuredCount(provider);
-          return (
-            <li key={provider.id}>
-              <button
-                type="button"
-                onClick={() => setOpenId(provider.id)}
-                className="flex w-full items-center gap-3 rounded-lg border border-border p-2.5 text-left hover:bg-card"
-              >
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-medium">
-                    {provider.label}
+    <div className="space-y-4">
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Agent credentials</label>
+        <p className="text-xs text-muted-foreground">
+          Credentials injected into a machine&apos;s environment when it is created.
+        </p>
+        <ul className="space-y-2">
+          {providers.map((provider) => {
+            const count = configuredCount(provider);
+            return (
+              <li key={provider.id}>
+                <button
+                  type="button"
+                  onClick={() => setOpenId(provider.id)}
+                  className="flex w-full items-center gap-3 rounded-lg border border-border p-2.5 text-left hover:bg-card"
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">
+                      {provider.label}
+                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {provider.description}
+                    </span>
                   </span>
-                  <span className="block truncate text-xs text-muted-foreground">
-                    {provider.description}
-                  </span>
+                  {count > 0 ? (
+                    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <span
+                        aria-hidden
+                        className="size-2 shrink-0 rounded-full bg-emerald-500"
+                      />
+                      Configured
+                      {provider.credentials.length > 1 ? ` (${count})` : ""}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">Not set</span>
+                  )}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Environment variables</label>
+        <p className="text-xs text-muted-foreground">
+          Anything else the machine should be created with in its environment.
+          Values are stored with the credentials above and never shown again.
+        </p>
+        {customKeys.length === 0 ? null : (
+          <ul className="space-y-2">
+            {customKeys.map((key) => (
+              <li key={key} className="flex flex-wrap items-center gap-2">
+                <span className="w-40 shrink-0 truncate font-mono text-xs">
+                  {key}
                 </span>
-                {count > 0 ? (
-                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <span
-                      aria-hidden
-                      className="size-2 shrink-0 rounded-full bg-emerald-500"
-                    />
-                    Configured
-                    {provider.credentials.length > 1 ? ` (${count})` : ""}
-                  </span>
-                ) : (
-                  <span className="text-xs text-muted-foreground">Not set</span>
-                )}
-              </button>
-            </li>
-          );
-        })}
-      </ul>
+                <Input
+                  type="password"
+                  value={drafts[key] ?? ""}
+                  onChange={(event) =>
+                    setDrafts((current) => ({
+                      ...current,
+                      [key]: event.target.value,
+                    }))
+                  }
+                  placeholder="Replace the stored value"
+                  className="max-w-xs font-mono"
+                  autoComplete="off"
+                  aria-label={key}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => save(key, drafts[key] ?? "")}
+                  disabled={busyKey === key || (drafts[key] ?? "").trim() === ""}
+                >
+                  {busyKey === key ? "Saving…" : "Save"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => save(key, "")}
+                  disabled={busyKey === key}
+                >
+                  Clear
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            value={newKey}
+            placeholder="NAME"
+            className="max-w-[12rem] font-mono"
+            autoComplete="off"
+            aria-label="New environment variable name"
+            onChange={(event) => setNewKey(event.target.value)}
+          />
+          <Input
+            type="password"
+            value={newValue}
+            placeholder="value"
+            className="max-w-xs font-mono"
+            autoComplete="off"
+            aria-label="New environment variable value"
+            onChange={(event) => setNewValue(event.target.value)}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              save(newKey.trim(), newValue);
+              setNewKey("");
+              setNewValue("");
+            }}
+            disabled={
+              busyKey !== null ||
+              newKey.trim() === "" ||
+              newValue.trim() === ""
+            }
+          >
+            Add variable
+          </Button>
+        </div>
+      </div>
+
       {error !== null ? <p className="text-destructive">{error}</p> : null}
     </div>
   );
@@ -1083,7 +1177,6 @@ function TemplateDetail({
   const rpc = useRpc<typeof rpcContract>();
   const [name, setName] = useState(template.name);
   const [commands, setCommands] = useState(template.commands);
-  const [env, setEnv] = useState<{ key: string; value: string }[]>(template.env);
   const [builds, setBuilds] = useState<PluginBuild[] | null>(null);
   const [openBuild, setOpenBuild] = useState<PluginBuild | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1110,7 +1203,7 @@ function TemplateDetail({
     setBusy(true);
     setError(null);
     rpc
-      .call("templates_update", { id: template.id, name, commands, env })
+      .call("templates_update", { id: template.id, name, commands })
       .then(() => {
         setBusy(false);
         setSaved(true);
@@ -1122,7 +1215,7 @@ function TemplateDetail({
     setError(null);
     // Save first: building the previous configuration would be surprising.
     rpc
-      .call("templates_update", { id: template.id, name, commands, env })
+      .call("templates_update", { id: template.id, name, commands })
       .then(() => rpc.call("templates_build", { id: template.id }))
       .then(() => {
         setBusy(false);
@@ -1189,57 +1282,7 @@ function TemplateDetail({
         />
       </div>
 
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium">Environment variables</label>
-        <p className="text-xs text-muted-foreground">
-          Named values baked into the image.
-        </p>
-        {env.map((entry, index) => (
-          <div key={index} className="flex items-center gap-2">
-            <Input
-              value={entry.key}
-              placeholder="NAME"
-              className="max-w-[12rem] font-mono"
-              onChange={(event) => {
-                const next = [...env];
-                next[index] = { ...entry, key: event.target.value };
-                setEnv(next);
-                setSaved(false);
-              }}
-            />
-            <Input
-              value={entry.value}
-              placeholder="value"
-              className="font-mono"
-              onChange={(event) => {
-                const next = [...env];
-                next[index] = { ...entry, value: event.target.value };
-                setEnv(next);
-                setSaved(false);
-              }}
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setEnv(env.filter((_, i) => i !== index));
-                setSaved(false);
-              }}
-            >
-              Remove
-            </Button>
-          </div>
-        ))}
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setEnv([...env, { key: "", value: "" }])}
-        >
-          Add variable
-        </Button>
-      </div>
-
-      <TemplateSecrets templateId={template.id} />
+      <TemplateEnvironment templateId={template.id} />
 
       {error !== null ? <p className="text-destructive">{error}</p> : null}
 

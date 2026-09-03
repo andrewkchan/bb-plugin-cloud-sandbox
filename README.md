@@ -35,7 +35,7 @@ Everything is optional and lives in the plugin's settings page.
 | --- | --- | --- |
 | `machineTimeoutSeconds` | `2700` | How long a machine lives before Vercel terminates it |
 | `machineVcpus` | `2` | vCPUs per machine (2 GB memory each) |
-| `templateSecrets` | — | Managed by each template's agent credentials; do not edit by hand |
+| `templateSecrets` | — | Managed by each template's environment editor; do not edit by hand |
 | `vercelSession` | — | Managed by the sign-in flow; do not edit by hand |
 
 Vercel caps sandbox lifetime at **45 minutes on Hobby** and 24 hours on
@@ -65,35 +65,44 @@ bb plugin logs cloud-sandbox -f
 | `server.ts` | Settings, RPC, sign-in orchestration, template and machine state, debug log. |
 | `app.tsx` | The Cloud Machines page and the settings tabs. |
 
-## Agent credentials
+## Environment and credentials
 
-Each template holds its own credentials, edited on its page. They are listed
-by agent provider. Currently, Claude Code and pi.dev are supported. Everything set
-here is injected into a machine's environment **when the machine is created**.
+Each template holds its own environment: the credentials listed by agent
+provider (currently Claude Code and pi.dev), plus any other variable you add.
+All of it is injected into a machine's environment **when the machine is
+created**, so nothing reaches an image layer, and changing a value takes
+effect on the next machine rather than the next build. Values are write-only:
+the plugin reports which keys are set and never returns one.
 
-This is different from template env vars, which are baked into the image.
+Because the build never sees them, custom commands cannot use these
+variables — a build step that needs a credential is not supported.
+
+Earlier versions baked a template's variables into its image instead. Nothing
+carries those over: set them again here, and rebuild to clear the values still
+sitting in the old image's layers.
 
 ## Templates
 
 ![The Templates tab, with one template building and one ready to use](docs/templates.png)
 
-A template is what a cloud machine is made of: an image, plus the credentials
+A template is what a cloud machine is made of: an image, plus the environment
 its machines are given.
 
 **Create template** starts from a preset — Blank, Claude Code, or
-[pi.dev](https://pi.dev). A preset only seeds a new template's name, commands
-and variables; it is ordinary editable configuration afterwards, not a link
-that keeps updating. Each template has a name, a block of custom commands, and
-build-time environment variables; building publishes its image to the container
-registry and the template becomes `Ready`.
+[pi.dev](https://pi.dev). A preset only seeds a new template's name and
+commands; it is ordinary editable configuration afterwards, not a link that
+keeps updating. Each template has a name, a block of custom commands, and its
+environment; building publishes its image to the container registry and the
+template becomes `Ready`.
 
 Every image starts from `docker.io/library/ubuntu:26.04` and installs bb's
 prerequisites first: Node (the host daemon needs 22.19+ and the stock base
 ships none) and a C toolchain (bb-app's `node-pty` is a native add-on built
 from source at enrolment).
 
-Build-time env vars are baked into the image and visible to anyone who can
-pull it.
+Nothing from a template's environment enters the image: an image is a shared
+artifact anyone able to pull it can read, so credentials are injected when a
+machine is created instead.
 
 Templates and their build logs live in the plugin's SQLite database rather
 than `bb.storage.kv`, because a build log routinely exceeds the 256KB kv value
@@ -103,7 +112,7 @@ cap.
 the chevron beside the button; the dropdown also offers "No template" for
 Vercel's default managed image.
 
-Deleting a template removes it, its build history and its credentials from bb
+Deleting a template removes it, its build history and its environment from bb
 **and deletes its image from the container registry**.
 
 ## Building custom images
