@@ -28,7 +28,15 @@ import {
   type EnrollmentDetails,
   type SandboxCredentials,
 } from "./machines.js";
-import { AGENT_PROVIDERS } from "./agents.js";
+import { AGENT_PROVIDERS, type AgentCredential } from "./agents.js";
+import {
+  GH_TOKEN,
+  GIT_AUTHOR_EMAIL,
+  GIT_AUTHOR_NAME,
+  GitHubImportError,
+  importLocalGitHubIdentity,
+  withDerivedGitIdentity,
+} from "./github.js";
 import {
   assertSafeEnvKey,
   buildImage,
@@ -141,6 +149,31 @@ const machineViewSchema = z.object({
 export type MachineView = z.infer<typeof machineViewSchema>;
 
 const templateStatusSchema = z.enum(["pending", "building", "ready", "error"]);
+
+/**
+ * The git identity and GitHub token every machine is given.
+ *
+ * Account-level rather than per-template: one person has one git identity.
+ * The token is never returned, only whether one is stored.
+ */
+const githubStatusSchema = z.object({
+  name: z.string().nullable(),
+  email: z.string().nullable(),
+  tokenSet: z.boolean(),
+  /** The GitHub account an import came from, when the values came from one. */
+  importedFrom: z.string().nullable(),
+  importedAt: z.number().nullable(),
+});
+export type GitHubStatus = z.infer<typeof githubStatusSchema>;
+
+/** One variable of a template's environment, as the page sees it. */
+const templateVarSchema = z.object({
+  key: z.string(),
+  secret: z.boolean(),
+  /** The stored value, or null when it is a secret and stays hidden. */
+  value: z.string().nullable(),
+});
+export type TemplateVar = z.infer<typeof templateVarSchema>;
 
 const templateSchema = z.object({
   id: z.string(),
@@ -270,25 +303,50 @@ export const rpcContract = defineRpcContract({
           label: z.string(),
           description: z.string(),
           hint: z.string(),
-          credentials: z.array(z.object({ key: z.string(), label: z.string() })),
+          credentials: z.array(
+            z.object({
+              key: z.string(),
+              label: z.string(),
+              secret: z.boolean(),
+            }),
+          ),
         }),
       ),
     }),
   },
-  /** Which secrets a template holds. Values are never returned. */
-  templates_secret_keys: {
+  /**
+   * The variables a template injects when a machine is created. A secret's
+   * value is never returned, only the fact that it is set.
+   */
+  templates_env_list: {
     input: z.object({ templateId: z.string() }),
-    output: z.object({ keys: z.array(z.string()) }),
+    output: z.object({ vars: z.array(templateVarSchema) }),
   },
-  /** Set or, with an empty value, clear one of a template's secrets. */
-  templates_set_secret: {
+  /** Set or, with an empty value, clear one of a template's variables. */
+  templates_env_set: {
     input: z.object({
       templateId: z.string(),
       key: z.string().min(1).max(200),
       value: z.string().max(20_000),
+      /** Ignored for a key a provider owns: the provider decides. */
+      secret: z.boolean(),
     }),
-    output: z.object({ keys: z.array(z.string()) }),
+    output: z.object({ vars: z.array(templateVarSchema) }),
   },
+  /** The git identity and token every machine is created with. */
+  github_status: { input: z.null(), output: githubStatusSchema },
+  /** Read the bb host's own `gh` login into that identity. */
+  github_import: { input: z.null(), output: githubStatusSchema },
+  /** Correct one field by hand; an empty value clears it. */
+  github_set: {
+    input: z.object({
+      key: z.enum([GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, GH_TOKEN]),
+      value: z.string().max(20_000),
+    }),
+    output: githubStatusSchema,
+  },
+  /** Forget the identity entirely. */
+  github_clear: { input: z.null(), output: githubStatusSchema },
   templates_build: {
     input: z.object({ id: z.string() }),
     output: z.object({ started: z.boolean() }),
@@ -343,6 +401,14 @@ export default async function plugin(bb: BbPluginApi) {
     templateSecrets: {
       type: "string",
       label: "Template environment (managed by the Templates tab)",
+      secret: true,
+    },
+    // The git identity and GitHub token every machine is created with, as
+    // JSON. Secret for the token it carries, and account-level because one
+    // person has one git identity.
+    githubIdentity: {
+      type: "string",
+      label: "Git identity and GitHub token (managed by the Authentication tab)",
       secret: true,
     },
     machineVcpus: {
@@ -464,32 +530,128 @@ export default async function plugin(bb: BbPluginApi) {
   /** Templates whose build is running in this plugin generation. */
   const building = new Set<string>();
 
-  const templateSecretsSchema = z.record(z.string(), z.record(z.string(), z.string()));
+  /**
+   * One variable as it is stored.
+   *
+   * A bare string is how every variable was stored when they were all
+   * secrets; it still reads as one. Anything written since carries whether it
+   * is secret, which is what decides if its value is ever handed back.
+   */
+  const storedVarSchema = z.union([
+    z.string().transform((value) => ({ value, secret: true })),
+    z.object({ value: z.string(), secret: z.boolean() }),
+  ]);
+  const templateVarsSchema = z.record(
+    z.string(),
+    z.record(z.string(), storedVarSchema),
+  );
 
-  async function readAllSecrets(): Promise<Record<string, Record<string, string>>> {
+  interface StoredVar {
+    value: string;
+    secret: boolean;
+  }
+
+  async function readAllVars(): Promise<Record<string, Record<string, StoredVar>>> {
     const { templateSecrets } = await settings.get();
     if (templateSecrets === undefined || templateSecrets.trim() === "") return {};
-    const parsed = templateSecretsSchema.safeParse(
+    const parsed = templateVarsSchema.safeParse(
       JSON.parse(templateSecrets) as unknown,
     );
     return parsed.success ? parsed.data : {};
   }
 
-  async function readSecrets(templateId: string): Promise<Record<string, string>> {
-    return (await readAllSecrets())[templateId] ?? {};
+  async function readVars(templateId: string): Promise<Record<string, StoredVar>> {
+    return (await readAllVars())[templateId] ?? {};
   }
 
-  async function writeSecrets(
+  /**
+   * Every variable lives in the same 0600 secret setting, secret or not.
+   * Splitting the non-secret ones into the database would buy nothing — they
+   * are injected together and read back together — and would leave two places
+   * for one key to be defined in.
+   */
+  async function writeVars(
     templateId: string,
-    secrets: Record<string, string>,
+    vars: Record<string, StoredVar>,
   ): Promise<void> {
-    const all = await readAllSecrets();
-    if (Object.keys(secrets).length === 0) delete all[templateId];
-    else all[templateId] = secrets;
+    const all = await readAllVars();
+    if (Object.keys(vars).length === 0) delete all[templateId];
+    else all[templateId] = vars;
     await bb.sdk.plugins.updateSettings({
       pluginId: bb.pluginId,
       values: { templateSecrets: JSON.stringify(all) },
     });
+  }
+
+  /** A settings value that will not parse is treated as one never written. */
+  function safeJson(text: string): unknown {
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return null;
+    }
+  }
+
+  const storedGitHubSchema = z.object({
+    name: z.string().nullish(),
+    email: z.string().nullish(),
+    token: z.string().nullish(),
+    importedFrom: z.string().nullish(),
+    importedAt: z.number().nullish(),
+  });
+  type StoredGitHub = z.infer<typeof storedGitHubSchema>;
+
+  async function readGitHub(): Promise<StoredGitHub> {
+    const { githubIdentity } = await settings.get();
+    if (githubIdentity === undefined || githubIdentity.trim() === "") return {};
+    const parsed = storedGitHubSchema.safeParse(safeJson(githubIdentity));
+    return parsed.success ? parsed.data : {};
+  }
+
+  async function writeGitHub(identity: StoredGitHub): Promise<void> {
+    await bb.sdk.plugins.updateSettings({
+      pluginId: bb.pluginId,
+      values: { githubIdentity: JSON.stringify(identity) },
+    });
+  }
+
+  function toGitHubStatus(identity: StoredGitHub): GitHubStatus {
+    return {
+      name: identity.name ?? null,
+      email: identity.email ?? null,
+      tokenSet: (identity.token ?? "") !== "",
+      importedFrom: identity.importedFrom ?? null,
+      importedAt: identity.importedAt ?? null,
+    };
+  }
+
+  /** The identity as environment variables, skipping whatever is unset. */
+  function gitHubEnv(identity: StoredGitHub): Record<string, string> {
+    const env: Record<string, string> = {};
+    if ((identity.name ?? "") !== "") env[GIT_AUTHOR_NAME] = identity.name!;
+    if ((identity.email ?? "") !== "") env[GIT_AUTHOR_EMAIL] = identity.email!;
+    if ((identity.token ?? "") !== "") env[GH_TOKEN] = identity.token!;
+    return env;
+  }
+
+  /** The stored variables as the page sees them: secret values withheld. */
+  function toTemplateVars(vars: Record<string, StoredVar>): TemplateVar[] {
+    return Object.entries(vars)
+      .map(([key, { value, secret }]) => ({
+        key,
+        secret,
+        value: secret ? null : value,
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  /** What a provider declares about a key, when a provider owns it at all. */
+  function providerCredential(key: string): AgentCredential | null {
+    for (const provider of AGENT_PROVIDERS) {
+      const credential = provider.credentials.find((c) => c.key === key);
+      if (credential !== undefined) return credential;
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------- events
@@ -1020,14 +1182,32 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /**
-   * The environment a template hands to its machines at creation.
+   * The environment a machine is created with: the account's git identity,
+   * then whatever its template adds.
    *
    * These are environment variables on the sandbox rather than anything built
    * into its image: an image is a shared artifact that anyone able to pull it
    * can read, so a long-lived credential must not end up in one of its layers.
+   *
+   * A template's own variables win, so a template that deliberately sets one
+   * of the git keys is not overruled by the account-level identity. The git
+   * identity applies even with no template at all, which is why it is not
+   * folded into the template lookup.
    */
-  async function templateEnv(templateId: string | null): Promise<Record<string, string>> {
-    return templateId === null ? {} : readSecrets(templateId);
+  async function machineEnv(
+    templateId: string | null,
+  ): Promise<Record<string, string>> {
+    const identity = gitHubEnv(await readGitHub());
+    const vars =
+      templateId === null
+        ? {}
+        : Object.fromEntries(
+            Object.entries(await readVars(templateId)).map(([key, stored]) => [
+              key,
+              stored.value,
+            ]),
+          );
+    return withDerivedGitIdentity({ ...identity, ...vars });
   }
 
   /**
@@ -1086,7 +1266,7 @@ export default async function plugin(bb: BbPluginApi) {
         const result = await createMachine({
           credentials,
           enrollment,
-          env: await templateEnv(template?.id ?? null),
+          env: await machineEnv(template?.id ?? null),
           ...(template?.imageRef == null ? {} : { image: template.imageRef }),
           timeoutMs,
           vcpus: Number.isFinite(vcpus) ? vcpus : 2,
@@ -1410,8 +1590,8 @@ export default async function plugin(bb: BbPluginApi) {
     templates_delete: async ({ id }) => {
       db.prepare("DELETE FROM builds WHERE template_id = ?").run(id);
       const result = db.prepare("DELETE FROM templates WHERE id = ?").run(id);
-      // A template's secrets have no meaning without it.
-      await writeSecrets(id, {});
+      // A template's environment has no meaning without it.
+      await writeVars(id, {});
       bb.realtime.publish(TEMPLATES_CHANGED, {});
       // The tag is the image id, so this removes exactly this image's
       // manifest; the prune then catches anything it superseded.
@@ -1421,21 +1601,78 @@ export default async function plugin(bb: BbPluginApi) {
       await recordCleanup("prune after delete", pruneUntaggedImages);
       return { deleted: result.changes > 0 };
     },
+    github_status: async () => toGitHubStatus(await readGitHub()),
+    github_import: async () => {
+      try {
+        const identity = await importLocalGitHubIdentity();
+        const stored: StoredGitHub = {
+          name: identity.name,
+          email: identity.email,
+          token: identity.token,
+          importedFrom: identity.login,
+          importedAt: Date.now(),
+        };
+        await writeGitHub(stored);
+        bb.log.info(`imported the git identity of @${identity.login} from gh`);
+        return toGitHubStatus(stored);
+      } catch (error) {
+        // Every import failure is something the user can act on, and none of
+        // them should reach the page as a stack trace.
+        if (error instanceof GitHubImportError) throw new Error(error.message);
+        throw error;
+      }
+    },
+    github_set: async ({ key, value }) => {
+      const identity = await readGitHub();
+      const trimmed = value.trim();
+      const field = (
+        {
+          [GIT_AUTHOR_NAME]: "name",
+          [GIT_AUTHOR_EMAIL]: "email",
+          [GH_TOKEN]: "token",
+        } as const
+      )[key];
+      const next: StoredGitHub = {
+        ...identity,
+        [field]: trimmed === "" ? undefined : trimmed,
+      };
+      // Edited by hand is no longer what `gh` reported, and saying otherwise
+      // would misattribute whatever is now stored.
+      if (identity.importedFrom != null) {
+        next.importedFrom = undefined;
+        next.importedAt = undefined;
+      }
+      await writeGitHub(next);
+      return toGitHubStatus(next);
+    },
+    github_clear: async () => {
+      await writeGitHub({});
+      return toGitHubStatus({});
+    },
     templates_build: async ({ id }) => ({ started: await startBuild(id) }),
     agent_providers: () => ({ providers: AGENT_PROVIDERS }),
-    templates_secret_keys: async ({ templateId }) => ({
-      keys: Object.keys(await readSecrets(templateId)).sort(),
+    templates_env_list: async ({ templateId }) => ({
+      vars: toTemplateVars(await readVars(templateId)),
     }),
-    templates_set_secret: async ({ templateId, key, value }) => {
+    templates_env_set: async ({ templateId, key, value, secret }) => {
       // Any name a shell can export: this store holds both the agent
       // credentials the providers list and whatever else a template needs in
       // its machines' environment.
       assertSafeEnvKey(key);
-      const secrets = await readSecrets(templateId);
-      if (value.trim() === "") delete secrets[key];
-      else secrets[key] = value.trim();
-      await writeSecrets(templateId, secrets);
-      return { keys: Object.keys(secrets).sort() };
+      const vars = await readVars(templateId);
+      if (value.trim() === "") delete vars[key];
+      else {
+        // A provider's own key is secret or not by the provider's definition,
+        // whatever the page asked for: a token must not become readable
+        // because a request said so.
+        const credential = providerCredential(key);
+        vars[key] = {
+          value: value.trim(),
+          secret: credential?.secret ?? secret,
+        };
+      }
+      await writeVars(templateId, vars);
+      return { vars: toTemplateVars(vars) };
     },
     builds_list: ({ templateId }) => ({
       builds: db

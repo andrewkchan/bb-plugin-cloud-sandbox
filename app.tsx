@@ -15,8 +15,10 @@ import type {
   DebugEvent,
   MachineView,
   PluginBuild,
+  GitHubStatus,
   PluginTemplate,
   rpcContract,
+  TemplateVar,
 } from "./server";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,6 +38,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -900,10 +903,17 @@ function BuildLog({ build, onBack }: { build: PluginBuild; onBack: () => void })
 
 /**
  * Everything a template injects into a machine's environment when it is
- * created: the agent credentials each provider reads, and other env vars.
+ * created: the agent credentials each provider reads, and any other variable
+ * the template needs.
  *
- * Write-only: the backend reports which keys are set and never returns a
- * value.
+ * Nothing here is built into the image. An image is a shared artifact anyone
+ * able to pull it can read, so a value that reached one would be readable
+ * from its layers forever; injecting at creation also means changing a value
+ * takes effect on the next machine rather than on the next build.
+ *
+ * A variable is secret or not. A secret is write-only — the backend reports
+ * that it is set and never returns it — while an ordinary variable is shown
+ * and edited in place, because hiding a git author's name helps nobody.
  */
 function TemplateEnvironment({ templateId }: { templateId: string }) {
   const rpc = useRpc<typeof rpcContract>();
@@ -913,15 +923,16 @@ function TemplateEnvironment({ templateId }: { templateId: string }) {
       label: string;
       description: string;
       hint: string;
-      credentials: { key: string; label: string }[];
+      credentials: { key: string; label: string; secret: boolean }[];
     }[]
   >([]);
-  const [keys, setKeys] = useState<string[] | null>(null);
+  const [vars, setVars] = useState<TemplateVar[] | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
+  const [newSecret, setNewSecret] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const report = useCallback((cause: unknown) => {
@@ -935,33 +946,102 @@ function TemplateEnvironment({ templateId }: { templateId: string }) {
 
   useEffect(() => {
     rpc
-      .call("templates_secret_keys", { templateId })
-      .then((r) => setKeys(r.keys), report);
+      .call("templates_env_list", { templateId })
+      .then((r) => setVars(r.vars), report);
   }, [rpc, templateId, report]);
 
-  const save = (key: string, value: string) => {
+  const stored = (key: string) => vars?.find((v) => v.key === key) ?? null;
+  const isSet = (key: string) => stored(key) !== null;
+
+  const save = (key: string, value: string, secret: boolean) => {
     setBusyKey(key);
     setError(null);
     rpc
-      .call("templates_set_secret", { templateId, key, value })
+      .call("templates_env_set", { templateId, key, value, secret })
       .then((r) => {
         setBusyKey(null);
-        setKeys(r.keys);
-        setDrafts((current) => ({ ...current, [key]: "" }));
+        setVars(r.vars);
+        // A secret's field is cleared so it never shows what was just saved;
+        // an ordinary variable keeps showing its value, now the stored one.
+        setDrafts((current) => {
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
       }, report);
   };
 
-  const isSet = (key: string) => keys?.includes(key) ?? false;
+  /**
+   * One editable variable. A secret takes a password field that starts empty
+   * whatever is stored; anything else starts from its stored value.
+   */
+  const field = (options: {
+    key: string;
+    label: string;
+    secret: boolean;
+    onClear: () => void;
+  }) => {
+    const { key, label, secret, onClear } = options;
+    const current = stored(key);
+    const draft = drafts[key] ?? (secret ? "" : (current?.value ?? ""));
+    const unchanged = secret
+      ? draft.trim() === ""
+      : draft === (current?.value ?? "");
+    return (
+      <li key={key} className="flex flex-wrap items-center gap-2">
+        <span className="w-40 shrink-0 truncate text-xs" title={key}>
+          {label}
+          {isSet(key) && secret ? (
+            <span className="ml-1.5 text-emerald-600 dark:text-emerald-500">
+              ✓
+            </span>
+          ) : null}
+        </span>
+        <Input
+          type={secret ? "password" : "text"}
+          value={draft}
+          onChange={(event) =>
+            setDrafts((current) => ({ ...current, [key]: event.target.value }))
+          }
+          placeholder={
+            secret && isSet(key) ? "Replace the stored value" : key
+          }
+          className="max-w-xs font-mono"
+          autoComplete="off"
+          aria-label={label}
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => save(key, draft, secret)}
+          disabled={busyKey === key || unchanged || draft.trim() === ""}
+        >
+          {busyKey === key ? "Saving…" : "Save"}
+        </Button>
+        {isSet(key) ? (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onClear}
+            disabled={busyKey === key}
+          >
+            Clear
+          </Button>
+        ) : null}
+      </li>
+    );
+  };
+
   const configuredCount = (provider: (typeof providers)[number]) =>
     provider.credentials.filter((c) => isSet(c.key)).length;
 
   const open = providers.find((provider) => provider.id === openId) ?? null;
-  // Everything the providers above do not already own is a variable the user
-  // added themselves, and belongs in the second section.
+  // Everything the providers do not already own is a variable the user added
+  // themselves, and belongs in the second section.
   const providerKeys = new Set(
     providers.flatMap((provider) => provider.credentials.map((c) => c.key)),
   );
-  const customKeys = (keys ?? []).filter((key) => !providerKeys.has(key));
+  const customVars = (vars ?? []).filter((v) => !providerKeys.has(v.key));
 
   if (open !== null) {
     return (
@@ -974,55 +1054,14 @@ function TemplateEnvironment({ templateId }: { templateId: string }) {
         </div>
         <p className="text-xs text-muted-foreground">{open.hint}</p>
         <ul className="space-y-2">
-          {open.credentials.map((credential) => (
-            <li key={credential.key} className="flex flex-wrap items-center gap-2">
-              <span className="w-40 shrink-0 text-xs">
-                {credential.label}
-                {isSet(credential.key) ? (
-                  <span className="ml-1.5 text-emerald-600 dark:text-emerald-500">
-                    ✓
-                  </span>
-                ) : null}
-              </span>
-              <Input
-                type="password"
-                value={drafts[credential.key] ?? ""}
-                onChange={(event) =>
-                  setDrafts((current) => ({
-                    ...current,
-                    [credential.key]: event.target.value,
-                  }))
-                }
-                placeholder={
-                  isSet(credential.key) ? "Replace the stored value" : credential.key
-                }
-                className="max-w-xs font-mono"
-                autoComplete="off"
-                aria-label={`${open.label} ${credential.label}`}
-              />
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => save(credential.key, drafts[credential.key] ?? "")}
-                disabled={
-                  busyKey === credential.key ||
-                  (drafts[credential.key] ?? "").trim() === ""
-                }
-              >
-                {busyKey === credential.key ? "Saving…" : "Save"}
-              </Button>
-              {isSet(credential.key) ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => save(credential.key, "")}
-                  disabled={busyKey === credential.key}
-                >
-                  Clear
-                </Button>
-              ) : null}
-            </li>
-          ))}
+          {open.credentials.map((credential) =>
+            field({
+              key: credential.key,
+              label: credential.label,
+              secret: credential.secret,
+              onClear: () => save(credential.key, "", credential.secret),
+            }),
+          )}
         </ul>
         {error !== null ? <p className="text-destructive">{error}</p> : null}
       </div>
@@ -1034,7 +1073,7 @@ function TemplateEnvironment({ templateId }: { templateId: string }) {
       <div className="space-y-1.5">
         <label className="text-xs font-medium">Agent credentials</label>
         <p className="text-xs text-muted-foreground">
-          Credentials injected into a machine&apos;s environment when it is created.
+          Injected into a machine&apos;s environment when it is created.
         </p>
         <ul className="space-y-2">
           {providers.map((provider) => {
@@ -1077,47 +1116,18 @@ function TemplateEnvironment({ templateId }: { templateId: string }) {
         <label className="text-xs font-medium">Environment variables</label>
         <p className="text-xs text-muted-foreground">
           Anything else the machine should be created with in its environment.
-          Values are stored with the credentials above and never shown again.
+          A variable marked secret is stored write-only and never shown again.
         </p>
-        {customKeys.length === 0 ? null : (
+        {customVars.length === 0 ? null : (
           <ul className="space-y-2">
-            {customKeys.map((key) => (
-              <li key={key} className="flex flex-wrap items-center gap-2">
-                <span className="w-40 shrink-0 truncate font-mono text-xs">
-                  {key}
-                </span>
-                <Input
-                  type="password"
-                  value={drafts[key] ?? ""}
-                  onChange={(event) =>
-                    setDrafts((current) => ({
-                      ...current,
-                      [key]: event.target.value,
-                    }))
-                  }
-                  placeholder="Replace the stored value"
-                  className="max-w-xs font-mono"
-                  autoComplete="off"
-                  aria-label={key}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => save(key, drafts[key] ?? "")}
-                  disabled={busyKey === key || (drafts[key] ?? "").trim() === ""}
-                >
-                  {busyKey === key ? "Saving…" : "Save"}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => save(key, "")}
-                  disabled={busyKey === key}
-                >
-                  Clear
-                </Button>
-              </li>
-            ))}
+            {customVars.map((variable) =>
+              field({
+                key: variable.key,
+                label: variable.key,
+                secret: variable.secret,
+                onClear: () => save(variable.key, "", variable.secret),
+              }),
+            )}
           </ul>
         )}
         <div className="flex flex-wrap items-center gap-2">
@@ -1130,7 +1140,7 @@ function TemplateEnvironment({ templateId }: { templateId: string }) {
             onChange={(event) => setNewKey(event.target.value)}
           />
           <Input
-            type="password"
+            type={newSecret ? "password" : "text"}
             value={newValue}
             placeholder="value"
             className="max-w-xs font-mono"
@@ -1138,18 +1148,24 @@ function TemplateEnvironment({ templateId }: { templateId: string }) {
             aria-label="New environment variable value"
             onChange={(event) => setNewValue(event.target.value)}
           />
+          <label className="flex items-center gap-1.5 text-xs">
+            <Checkbox
+              checked={newSecret}
+              onCheckedChange={(checked) => setNewSecret(checked === true)}
+              aria-label="Store as a secret"
+            />
+            Secret
+          </label>
           <Button
             variant="outline"
             size="sm"
             onClick={() => {
-              save(newKey.trim(), newValue);
+              save(newKey.trim(), newValue, newSecret);
               setNewKey("");
               setNewValue("");
             }}
             disabled={
-              busyKey !== null ||
-              newKey.trim() === "" ||
-              newValue.trim() === ""
+              busyKey !== null || newKey.trim() === "" || newValue.trim() === ""
             }
           >
             Add variable
@@ -1599,6 +1615,164 @@ function VercelAuthSection() {
 }
 
 /**
+ * The git identity and GitHub token every machine is created with.
+ *
+ * Account-level rather than per-template: one person has one git identity,
+ * and a token that can push is not worth configuring again per image. The
+ * name and email are shown and editable; the token is write-only.
+ */
+function GitHubSection() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [status, setStatus] = useState<GitHubStatus | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const report = useCallback((cause: unknown) => {
+    setBusy(null);
+    setError(cause instanceof Error ? cause.message : String(cause));
+  }, []);
+
+  const apply = useCallback((next: GitHubStatus) => {
+    setBusy(null);
+    setStatus(next);
+    setDrafts({});
+  }, []);
+
+  useEffect(() => {
+    rpc.call("github_status").then(setStatus, report);
+  }, [rpc, report]);
+
+  const runImport = () => {
+    setBusy("import");
+    setError(null);
+    rpc.call("github_import").then(apply, report);
+  };
+
+  const set = (key: "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GH_TOKEN", value: string) => {
+    setBusy(key);
+    setError(null);
+    rpc.call("github_set", { key, value }).then(apply, report);
+  };
+
+  const clear = () => {
+    setBusy("clear");
+    setError(null);
+    rpc.call("github_clear").then(apply, report);
+  };
+
+  if (status === null) {
+    return <p className="text-sm text-muted-foreground">Loading…</p>;
+  }
+
+  const text = (
+    key: "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL",
+    label: string,
+    stored: string | null,
+  ) => {
+    const draft = drafts[key] ?? stored ?? "";
+    return (
+      <li className="flex flex-wrap items-center gap-2">
+        <span className="w-24 shrink-0 text-xs">{label}</span>
+        <Input
+          value={draft}
+          onChange={(event) =>
+            setDrafts((current) => ({ ...current, [key]: event.target.value }))
+          }
+          placeholder={key}
+          className="max-w-xs font-mono"
+          autoComplete="off"
+          aria-label={label}
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => set(key, draft)}
+          disabled={busy !== null || draft === (stored ?? "")}
+        >
+          {busy === key ? "Saving…" : "Save"}
+        </Button>
+      </li>
+    );
+  };
+
+  return (
+    <div className="space-y-2 text-sm">
+      <p className="font-medium">GitHub</p>
+      <p className="text-xs text-muted-foreground">
+        Injected into every machine when it is created, so agents can commit and
+        open pull requests. Import reads the GitHub CLI&apos;s own login on this
+        computer — whatever access <code>gh</code> already has is what a machine
+        gets.
+      </p>
+      <ul className="space-y-2">
+        {text("GIT_AUTHOR_NAME", "Name", status.name)}
+        {text("GIT_AUTHOR_EMAIL", "Email", status.email)}
+        <li className="flex flex-wrap items-center gap-2">
+          <span className="w-24 shrink-0 text-xs">
+            Token
+            {status.tokenSet ? (
+              <span className="ml-1.5 text-emerald-600 dark:text-emerald-500">
+                ✓
+              </span>
+            ) : null}
+          </span>
+          <Input
+            type="password"
+            value={drafts.GH_TOKEN ?? ""}
+            onChange={(event) =>
+              setDrafts((current) => ({
+                ...current,
+                GH_TOKEN: event.target.value,
+              }))
+            }
+            placeholder={
+              status.tokenSet ? "Replace the stored token" : "GH_TOKEN"
+            }
+            className="max-w-xs font-mono"
+            autoComplete="off"
+            aria-label="GitHub token"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => set("GH_TOKEN", drafts.GH_TOKEN ?? "")}
+            disabled={busy !== null || (drafts.GH_TOKEN ?? "").trim() === ""}
+          >
+            {busy === "GH_TOKEN" ? "Saving…" : "Save"}
+          </Button>
+        </li>
+      </ul>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" onClick={runImport} disabled={busy !== null}>
+          {busy === "import"
+            ? "Importing…"
+            : status.importedFrom === null
+              ? "Import from local gh"
+              : "Re-import from local gh"}
+        </Button>
+        {status.name !== null || status.email !== null || status.tokenSet ? (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={clear}
+            disabled={busy !== null}
+          >
+            Clear
+          </Button>
+        ) : null}
+        {status.importedFrom === null ? null : (
+          <span className="text-xs text-muted-foreground">
+            Imported from @{status.importedFrom}
+          </span>
+        )}
+      </div>
+      {error !== null ? <p className="text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
+/**
  * Routes into this plugin's settings page. The tab is component state, so a
  * deep link carries it in the hash.
  */
@@ -1646,7 +1820,10 @@ function CloudSandboxSettings() {
         <TemplatesTab />
       </TabsContent>
       <TabsContent value="authentication" className="pt-4">
-        <VercelAuthSection />
+        <div className="space-y-6">
+          <VercelAuthSection />
+          <GitHubSection />
+        </div>
       </TabsContent>
     </Tabs>
   );

@@ -12,7 +12,8 @@ is currently no CLI interface.
   Each row shows the image it was created from and has a menu to wake, stop or
   delete it.
 - **Settings** — two tabs: **Templates** (what a machine is made of) and
-  **Authentication** (the Vercel account).
+  **Authentication** (the Vercel account, and the git identity every machine
+  commits as).
 
 ![The Cloud Machines page, listing machines with their status, template, and session uptime](docs/cloud-machines.png)
 
@@ -35,6 +36,7 @@ Everything is optional and lives in the plugin's settings page.
 | --- | --- | --- |
 | `machineTimeoutSeconds` | `2700` | How long a machine lives before Vercel terminates it |
 | `machineVcpus` | `2` | vCPUs per machine (2 GB memory each) |
+| `githubIdentity` | — | Managed by the Authentication tab's GitHub section; do not edit by hand |
 | `templateSecrets` | — | Managed by each template's environment editor; do not edit by hand |
 | `vercelSession` | — | Managed by the sign-in flow; do not edit by hand |
 
@@ -60,19 +62,58 @@ bb plugin logs cloud-sandbox -f
 | `machines.ts` | Cloud machine lifecycle: create, enrol, list, stop, wake, delete. No bb dependency. |
 | `scripts/*.sh` | What a machine runs on itself: enrolment, wake, and the daemon supervisor that stands in for the service manager a container has none of. |
 | `templates.ts` | Template presets, the Dockerfile, the image build, and registry cleanup. No bb dependency. |
-| `agents.ts` | Agent providers and the credentials each one reads. No bb dependency. |
+| `agents.ts` | Agent providers and the values each one reads from the environment. No bb dependency. |
+| `github.ts` | Reads the host's `gh` login into the git identity every machine gets. No bb dependency. |
 | `auth.ts` | Vercel OAuth device authorization (RFC 8628). No bb dependency. |
 | `server.ts` | Settings, RPC, sign-in orchestration, template and machine state, debug log. |
 | `app.tsx` | The Cloud Machines page and the settings tabs. |
 
 ## Environment and credentials
 
-Each template holds its own environment: the credentials listed by agent
-provider (currently Claude Code and pi.dev), plus any other variable you add.
-All of it is injected into a machine's environment **when the machine is
-created**, so nothing reaches an image layer, and changing a value takes
-effect on the next machine rather than the next build. Values are write-only:
-the plugin reports which keys are set and never returns one.
+Each template holds its own environment: the values listed by agent provider
+(Claude Code and pi.dev), plus any other variable you add. All of it is
+injected into a machine's environment **when the machine is created**, so
+nothing reaches an image layer, and changing a value takes effect on the next
+machine rather than the next build.
+
+Each variable is either secret or not. A secret is write-only — the plugin
+reports that it is set and never returns it, so it can only be replaced or
+cleared — while an ordinary variable is shown and edited in place. A provider
+decides for its own keys; you choose for the ones you add.
+
+## Git identity and GitHub
+
+The identity a machine commits as is **account-level, not per-template** — one
+person has one git identity — and lives in the **Authentication** tab, next to
+the Vercel sign-in. It injects `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` (neither
+secret) and `GH_TOKEN` (secret) into every machine, whatever template it was
+created from, including none.
+
+**Import from local gh** reads the GitHub CLI's own login on the bb host, so a
+machine gets exactly the access `gh` already has — no OAuth app of this
+plugin's own, and no organization approval to arrange. It calls `/user` and
+`/user/emails` with the token, which is also what proves the token still
+works: `gh auth token` prints a revoked token as happily as a live one, and a
+machine created with a dead one fails much later somewhere far harder to
+diagnose.
+
+Two things worth knowing about the import:
+
+- `gh` reports a token it cannot read from the system keyring with the same
+  "no oauth token found" it uses for an account that was never signed in, so
+  the error covers both. If bb cannot reach your keychain, this is what you
+  will see even though `gh auth status` in a terminal looks fine.
+- `gh`'s default scopes do not include `user:email`, so `/user/emails` returns
+  404 and the email falls back to `ID+login@users.noreply.github.com`. That is
+  the address GitHub itself commits as for a private profile, and commits are
+  still attributed to the account.
+
+`GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` are copied from the author at
+creation unless set explicitly, because git otherwise commits as whatever it
+guesses from the container's user and hostname.
+
+A template that deliberately sets one of these keys wins over the account-level
+value, so a one-off template can still commit as something else.
 
 Because the build never sees them, custom commands cannot use these
 variables — a build step that needs a credential is not supported.
