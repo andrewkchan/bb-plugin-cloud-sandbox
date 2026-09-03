@@ -31,10 +31,15 @@ export const GIT_AUTHOR_EMAIL = "GIT_AUTHOR_EMAIL";
 export const GH_TOKEN = "GH_TOKEN";
 export const GITHUB_KEYS = [GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, GH_TOKEN];
 
-export interface GitHubIdentity {
+export interface GitHubProfile {
   /** The account the values came from, shown so a wrong import is obvious. */
   login: string;
   name: string;
+  /** Public avatar URL; needs no credentials of its own to load. */
+  avatarUrl: string;
+}
+
+export interface GitHubIdentity extends GitHubProfile {
   email: string;
   token: string;
 }
@@ -117,6 +122,7 @@ interface GitHubUser {
   id: number;
   name: string | null;
   email: string | null;
+  avatar_url: string;
 }
 
 interface GitHubEmail {
@@ -161,14 +167,7 @@ async function api<T>(path: string, token: string): Promise<T | null> {
  */
 export async function importLocalGitHubIdentity(): Promise<GitHubIdentity> {
   const token = await readToken();
-
-  const user = await api<GitHubUser>("/user", token);
-  if (user === null) {
-    throw new GitHubImportError(
-      "The token from `gh` cannot read your GitHub account. It is missing the " +
-        "`read:user` scope.",
-    );
-  }
+  const user = await readUser(token);
 
   // A public profile email is not necessarily the one to commit as, and is
   // null whenever email privacy is on, so the address list decides.
@@ -182,10 +181,38 @@ export async function importLocalGitHubIdentity(): Promise<GitHubIdentity> {
     `${user.id}+${user.login}@users.noreply.github.com`;
 
   return {
-    login: user.login,
-    // Plenty of accounts have no display name set.
-    name: user.name ?? user.login,
+    ...toProfile(user),
     email,
     token,
   };
+}
+
+function toProfile(user: GitHubUser): GitHubProfile {
+  return {
+    login: user.login,
+    // Plenty of accounts have no display name set.
+    name: user.name ?? user.login,
+    avatarUrl: user.avatar_url,
+  };
+}
+
+async function readUser(token: string): Promise<GitHubUser> {
+  const user = await api<GitHubUser>("/user", token);
+  if (user === null) {
+    throw new GitHubImportError(
+      "The token cannot read your GitHub account. It is missing the " +
+        "`read:user` scope.",
+    );
+  }
+  return user;
+}
+
+/**
+ * Who a stored token belongs to.
+ *
+ * A token typed in by hand carries no account with it, so this is what puts a
+ * name and a face on it. The same call also confirms the token still works.
+ */
+export async function readProfile(token: string): Promise<GitHubProfile> {
+  return toProfile(await readUser(token));
 }

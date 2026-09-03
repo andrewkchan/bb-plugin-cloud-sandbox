@@ -527,7 +527,7 @@ function MachinesPage() {
             </p>
             <Button size="sm" className="mt-3" asChild>
               <UrlLink href={SETTINGS_AUTH_HREF}>
-                Sign in with Vercel
+                Set up plugin
                 <Icon
                   name="ExternalLink"
                   className="ml-1.5 size-3.5 opacity-60"
@@ -1615,6 +1615,105 @@ function VercelAuthSection() {
 }
 
 /**
+ * Which accounts the plugin is signed in to, on the page's title bar.
+ *
+ * Both are read here rather than passed down: the title bar is mounted beside
+ * the page, not inside it, and the two RPCs are cheap next to the machine
+ * list. Vercel is what the plugin cannot work without; GitHub only decides
+ * whether a machine can push, so neither is presented as an error.
+ */
+function AccountIndicators() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [vercel, setVercel] = useState<AuthStatus | null>(null);
+  const [github, setGithub] = useState<GitHubStatus | null>(null);
+  // A remote image that will not load should leave the login readable rather
+  // than a broken frame beside it.
+  const [avatarBroken, setAvatarBroken] = useState(false);
+
+  const refetch = useCallback(() => {
+    // A failure here must not take the title bar down with it, and there is
+    // nowhere in a title bar to report one.
+    rpc.call("auth_status").then(setVercel, () => setVercel(null));
+    rpc.call("github_status").then(setGithub, () => setGithub(null));
+  }, [rpc]);
+
+  useEffect(refetch, [refetch]);
+  useRealtime("auth-changed", refetch);
+
+  const chip = (content: React.ReactNode, href: string, title: string) => (
+    <UrlLink
+      href={href}
+      title={title}
+      className="flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-card hover:text-foreground"
+    >
+      {content}
+    </UrlLink>
+  );
+
+  const vercelChip =
+    vercel?.state === "signed-in" && vercel.teamSlug !== null
+      ? chip(
+          <>
+            <Icon name="Cloud" className="size-3" aria-hidden />
+            {vercel.teamSlug}
+          </>,
+          `https://vercel.com/${vercel.teamSlug}`,
+          `Vercel team ${vercel.teamSlug}`,
+        )
+      : chip(
+          <>
+            <Icon name="Cloud" className="size-3 opacity-40" aria-hidden />
+            Not logged into Vercel
+          </>,
+          SETTINGS_AUTH_HREF,
+          "Sign in to Vercel in the plugin's settings",
+        );
+
+  const githubChip =
+    github?.tokenSet === true
+      ? chip(
+          <>
+            {github.avatarUrl !== null && !avatarBroken ? (
+              <img
+                src={github.avatarUrl}
+                alt=""
+                className="size-4 rounded-full"
+                onError={() => setAvatarBroken(true)}
+              />
+            ) : (
+              <Icon name="Github" className="size-3" aria-hidden />
+            )}
+            {github.login ?? "GitHub"}
+          </>,
+          github.login === null
+            ? SETTINGS_AUTH_HREF
+            : `https://github.com/${github.login}`,
+          github.login === null
+            ? "A GitHub token is stored, but the account behind it is unknown"
+            : `GitHub profile of @${github.login}`,
+        )
+      : chip(
+          <>
+            <Icon name="Github" className="size-3 opacity-40" aria-hidden />
+            Not logged into GitHub
+          </>,
+          SETTINGS_AUTH_HREF,
+          "Add a GitHub token in the plugin's settings",
+        );
+
+  // Nothing is shown until both answers are in, so the bar does not flicker
+  // through "not logged in" on every mount.
+  if (vercel === null && github === null) return null;
+
+  return (
+    <div className="flex items-center gap-1">
+      {vercelChip}
+      {githubChip}
+    </div>
+  );
+}
+
+/**
  * The git identity and GitHub token every machine is created with.
  *
  * Account-level rather than per-template: one person has one git identity,
@@ -1626,6 +1725,7 @@ function GitHubSection() {
   const [status, setStatus] = useState<GitHubStatus | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [avatarBroken, setAvatarBroken] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const report = useCallback((cause: unknown) => {
@@ -1637,6 +1737,7 @@ function GitHubSection() {
     setBusy(null);
     setStatus(next);
     setDrafts({});
+    setAvatarBroken(false);
   }, []);
 
   useEffect(() => {
@@ -1705,6 +1806,26 @@ function GitHubSection() {
         computer — whatever access <code>gh</code> already has is what a machine
         gets.
       </p>
+      {/* The account the stored token belongs to. Worth a face: it is how you
+          notice a token that is not the one you meant to store. */}
+      {status.login === null ? null : (
+        <UrlLink
+          href={`https://github.com/${status.login}`}
+          className="flex w-fit items-center gap-2 rounded-md py-0.5 hover:underline"
+        >
+          {status.avatarUrl !== null && !avatarBroken ? (
+            <img
+              src={status.avatarUrl}
+              alt=""
+              className="size-8 rounded-full"
+              onError={() => setAvatarBroken(true)}
+            />
+          ) : (
+            <Icon name="Github" className="size-5" aria-hidden />
+          )}
+          <span className="text-xs">@{status.login}</span>
+        </UrlLink>
+      )}
       <ul className="space-y-2">
         {text("GIT_AUTHOR_NAME", "Name", status.name)}
         {text("GIT_AUTHOR_EMAIL", "Email", status.email)}
@@ -1761,9 +1882,11 @@ function GitHubSection() {
             Clear
           </Button>
         ) : null}
+        {/* The account itself is shown above; this only says where the values
+            came from, which is what distinguishes an import from hand-editing. */}
         {status.importedFrom === null ? null : (
           <span className="text-xs text-muted-foreground">
-            Imported from @{status.importedFrom}
+            Imported from the local <code>gh</code> login
           </span>
         )}
       </div>
@@ -1840,5 +1963,6 @@ export default definePluginApp((app) => {
     icon: "Cloud",
     path: "cloud-machines",
     component: MachinesPage,
+    headerContent: AccountIndicators,
   });
 });

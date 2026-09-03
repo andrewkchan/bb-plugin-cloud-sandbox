@@ -35,6 +35,7 @@ import {
   GIT_AUTHOR_NAME,
   GitHubImportError,
   importLocalGitHubIdentity,
+  readProfile,
   withDerivedGitIdentity,
 } from "./github.js";
 import {
@@ -160,6 +161,9 @@ const githubStatusSchema = z.object({
   name: z.string().nullable(),
   email: z.string().nullable(),
   tokenSet: z.boolean(),
+  /** The account the stored token belongs to, once it has been resolved. */
+  login: z.string().nullable(),
+  avatarUrl: z.string().nullable(),
   /** The GitHub account an import came from, when the values came from one. */
   importedFrom: z.string().nullable(),
   importedAt: z.number().nullable(),
@@ -596,6 +600,8 @@ export default async function plugin(bb: BbPluginApi) {
     name: z.string().nullish(),
     email: z.string().nullish(),
     token: z.string().nullish(),
+    login: z.string().nullish(),
+    avatarUrl: z.string().nullish(),
     importedFrom: z.string().nullish(),
     importedAt: z.number().nullish(),
   });
@@ -620,9 +626,55 @@ export default async function plugin(bb: BbPluginApi) {
       name: identity.name ?? null,
       email: identity.email ?? null,
       tokenSet: (identity.token ?? "") !== "",
+      login: identity.login ?? null,
+      avatarUrl: identity.avatarUrl ?? null,
       importedFrom: identity.importedFrom ?? null,
       importedAt: identity.importedAt ?? null,
     };
+  }
+
+  /**
+   * Set once a lookup has failed, so a token GitHub will not answer for is not
+   * re-checked on every status call. Cleared whenever the token changes.
+   */
+  let profileUnresolvable = false;
+
+  /**
+   * Fill in the account a stored token belongs to.
+   *
+   * A token typed in by hand arrives with no account attached, and the page
+   * wants a name and an avatar for it. Doing this lazily keeps the cost off
+   * the paths that only need to know whether a token is set, and a failure
+   * here is never fatal: an identity that cannot be resolved is simply shown
+   * without a face.
+   */
+  async function resolveGitHubProfile(): Promise<StoredGitHub> {
+    const identity = await readGitHub();
+    const token = identity.token ?? "";
+    if (token === "" || identity.login != null || profileUnresolvable) {
+      return identity;
+    }
+    try {
+      const profile = await readProfile(token);
+      const next: StoredGitHub = {
+        ...identity,
+        login: profile.login,
+        avatarUrl: profile.avatarUrl,
+        // A hand-typed token carries no name of its own; the account's is a
+        // better default than nothing, and stays editable.
+        name: identity.name ?? profile.name,
+      };
+      await writeGitHub(next);
+      return next;
+    } catch (error) {
+      profileUnresolvable = true;
+      bb.log.warn(
+        `could not resolve the GitHub account behind the stored token: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return identity;
+    }
   }
 
   /** The identity as environment variables, skipping whatever is unset. */
@@ -1610,7 +1662,7 @@ export default async function plugin(bb: BbPluginApi) {
       await recordCleanup("prune after delete", pruneUntaggedImages);
       return { deleted: result.changes > 0 };
     },
-    github_status: async () => toGitHubStatus(await readGitHub()),
+    github_status: async () => toGitHubStatus(await resolveGitHubProfile()),
     github_import: async () => {
       try {
         const identity = await importLocalGitHubIdentity();
@@ -1618,10 +1670,14 @@ export default async function plugin(bb: BbPluginApi) {
           name: identity.name,
           email: identity.email,
           token: identity.token,
+          login: identity.login,
+          avatarUrl: identity.avatarUrl,
           importedFrom: identity.login,
           importedAt: Date.now(),
         };
         await writeGitHub(stored);
+        profileUnresolvable = false;
+        bb.realtime.publish(AUTH_CHANGED, {});
         bb.log.info(`imported the git identity of @${identity.login} from gh`);
         return toGitHubStatus(stored);
       } catch (error) {
@@ -1651,11 +1707,21 @@ export default async function plugin(bb: BbPluginApi) {
         next.importedFrom = undefined;
         next.importedAt = undefined;
       }
+      // A new token belongs to whoever issued it, so the account shown beside
+      // it has to be worked out again rather than carried over.
+      if (key === GH_TOKEN) {
+        next.login = undefined;
+        next.avatarUrl = undefined;
+        profileUnresolvable = false;
+      }
       await writeGitHub(next);
-      return toGitHubStatus(next);
+      bb.realtime.publish(AUTH_CHANGED, {});
+      return toGitHubStatus(await resolveGitHubProfile());
     },
     github_clear: async () => {
       await writeGitHub({});
+      profileUnresolvable = false;
+      bb.realtime.publish(AUTH_CHANGED, {});
       return toGitHubStatus({});
     },
     templates_build: async ({ id }) => ({ started: await startBuild(id) }),
