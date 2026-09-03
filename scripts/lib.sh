@@ -20,6 +20,46 @@ is_connected() {
     grep -q '"connected"[[:space:]]*:[[:space:]]*true'
 }
 
+# Persist the variables this command carried, for the daemon to inherit.
+#
+# The daemon is what spawns every shell a thread runs in, so what it was
+# started with is what an agent sees. A sandbox's own environment is fixed
+# when it is created, which leaves a machine woken months later still holding
+# the token it was created with.
+#
+# BB_INJECTED_KEYS names the variables to keep: this command's environment
+# also holds PATH and everything else the sandbox sets, and only the plugin's
+# own values belong in the file.
+#
+# Returns 1 when the values changed, which is the caller's signal that a
+# daemon already running with the old ones has to be restarted.
+write_machine_env() {
+  [ -n "${BB_INJECTED_KEYS:-}" ] || return 0
+
+  file="$DATA/machine-env.sh"
+  tmp="$file.new"
+  # The file holds credentials, so it is never world-readable, not even
+  # briefly between creating it and writing to it.
+  : > "$tmp"
+  chmod 600 "$tmp"
+
+  for key in $BB_INJECTED_KEYS; do
+    eval "value=\${$key:-}"
+    [ -n "$value" ] || continue
+    # Single-quoted with embedded quotes escaped, so a value containing
+    # spaces, $ or backticks is data rather than shell.
+    escaped=$(printf %s "$value" | sed "s/'/'\\\\''/g")
+    printf "export %s='%s'\n" "$key" "$escaped" >> "$tmp"
+  done
+
+  if [ -f "$file" ] && cmp -s "$file" "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  mv "$tmp" "$file"
+  return 1
+}
+
 # The installer's temporary daemon holds the lock and the port; SIGTERM makes
 # it release both.
 stop_install_daemon() {

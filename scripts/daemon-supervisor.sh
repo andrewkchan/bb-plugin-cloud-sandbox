@@ -15,6 +15,10 @@ log="$DATA/daemon-supervisor.log"
 quick_exits=0
 while [ $quick_exits -lt 5 ]; do
   started=$(date +%s)
+  # Read on every launch rather than once: a wake that carried new credentials
+  # only has to rewrite this file for the next daemon to pick them up.
+  # shellcheck disable=SC1091 # written by write_machine_env at runtime
+  [ -f "$DATA/machine-env.sh" ] && . "$DATA/machine-env.sh"
   BB_APP_NPM_PREFIX="$DATA/npm" BB_DATA_DIR="$DATA" "$DATA/npm/bin/bb-app" host-daemon \
     --auto-update --host-daemon-port "$PORT" --server-url "$SERVER" >> "$log" 2>&1
   echo "host daemon exited ($?); relaunching" >> "$log"

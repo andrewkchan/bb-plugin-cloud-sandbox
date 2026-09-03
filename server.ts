@@ -1328,7 +1328,16 @@ export default async function plugin(bb: BbPluginApi) {
     void (async () => {
       try {
         await record("wake.requested", name, "Waking machine.");
-        const detail = await wakeMachine(credentials, name);
+        // The machine is handed the environment it would get if it were
+        // created now, not the one it was created with: an identity imported
+        // or a token rotated since then belongs on it too.
+        const templateId =
+          (await readRecords()).find((r) => r.name === name)?.templateId ?? null;
+        const detail = await wakeMachine(
+          credentials,
+          name,
+          await machineEnv(templateId),
+        );
         // A resumed machine is live again, so clear the disconnect marker.
         const records = await readRecords();
         await writeRecords(

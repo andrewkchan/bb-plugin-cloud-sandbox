@@ -60,7 +60,7 @@ bb plugin logs cloud-sandbox -f
 | File | Role |
 | --- | --- |
 | `machines.ts` | Cloud machine lifecycle: create, enrol, list, stop, wake, delete. No bb dependency. |
-| `scripts/*.sh` | What a machine runs on itself: enrolment, wake, and the daemon supervisor that stands in for the service manager a container has none of. |
+| `scripts/*.sh` | What a machine runs on itself: enrolment, wake, the injected-credential file, and the daemon supervisor that stands in for the service manager a container has none of. |
 | `templates.ts` | Template presets, the Dockerfile, the image build, and registry cleanup. No bb dependency. |
 | `agents.ts` | Agent providers and the values each one reads from the environment. No bb dependency. |
 | `github.ts` | Reads the host's `gh` login into the git identity every machine gets. No bb dependency. |
@@ -90,37 +90,12 @@ secret) and `GH_TOKEN` (secret) into every machine, whatever template it was
 created from, including none.
 
 **Import from local gh** reads the GitHub CLI's own login on the bb host, so a
-machine gets exactly the access `gh` already has — no OAuth app of this
-plugin's own, and no organization approval to arrange. It calls `/user` and
-`/user/emails` with the token, which is also what proves the token still
-works: `gh auth token` prints a revoked token as happily as a live one, and a
-machine created with a dead one fails much later somewhere far harder to
-diagnose.
+machine gets exactly the access `gh` already has.
 
-Two things worth knowing about the import:
-
-- `gh` reports a token it cannot read from the system keyring with the same
-  "no oauth token found" it uses for an account that was never signed in, so
-  the error covers both. If bb cannot reach your keychain, this is what you
-  will see even though `gh auth status` in a terminal looks fine.
-- `gh`'s default scopes do not include `user:email`, so `/user/emails` returns
-  404 and the email falls back to `ID+login@users.noreply.github.com`. That is
-  the address GitHub itself commits as for a private profile, and commits are
-  still attributed to the account.
-
-`GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` are copied from the author at
-creation unless set explicitly, because git otherwise commits as whatever it
-guesses from the container's user and hostname.
-
-A template that deliberately sets one of these keys wins over the account-level
-value, so a one-off template can still commit as something else.
-
-Because the build never sees them, custom commands cannot use these
-variables — a build step that needs a credential is not supported.
-
-Earlier versions baked a template's variables into its image instead. Nothing
-carries those over: set them again here, and rebuild to clear the values still
-sitting in the old image's layers.
+**Waking re-injects them.** A sandbox's own environment is fixed when it is
+created, so a token rotated afterwards would never reach a machine that
+already exists. Waking hands the machine the environment it *would* get if it
+were created now.
 
 ## Templates
 

@@ -28,6 +28,10 @@ curl -fL --connect-timeout 10 --max-time 60 --retry 2 "$server_url/install.sh" |
 # its temporary daemon running unwatched in place of one. Swap it for a
 # supervised daemon.
 locate_enrollment
+# Written now so the file exists from the machine's first boot: a wake then
+# compares against it rather than rewriting and restarting the daemon on a
+# machine whose credentials never changed.
+write_machine_env || true
 stop_install_daemon
 start_supervisor
 await_daemon

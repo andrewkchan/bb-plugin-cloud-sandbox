@@ -109,6 +109,19 @@ export const ENROLLMENT_SCRIPT = `${SHELL_LIB}\n${readScript("enroll.sh")}`;
 export const WAKE_SCRIPT = `${SHELL_LIB}\n${readScript("wake.sh")}`;
 
 /**
+ * The variables the machine should persist for its daemon to inherit.
+ *
+ * A sandbox's own environment is fixed when it is created, so a machine has
+ * to be told which of the variables it was handed are the plugin's rather
+ * than the sandbox's own; everything named here is written to a file the
+ * daemon reads on every launch.
+ */
+function injectedKeys(env: Record<string, string>): Record<string, string> {
+  const keys = Object.keys(env);
+  return keys.length === 0 ? {} : { BB_INJECTED_KEYS: keys.join(" ") };
+}
+
+/**
  * Create a sandbox that stays running and enroll it as a bb machine.
  *
  * Unlike runInSandbox this deliberately does NOT stop the sandbox — the whole
@@ -176,6 +189,9 @@ export async function createMachine(options: {
         enrollment.serverUrl,
         enrollment.machineCode,
       ],
+      // The values themselves are already in the sandbox's environment; this
+      // only says which of them to persist.
+      env: injectedKeys(env ?? {}),
       // Enrollment installs a compiler and builds native modules; on a cold
       // image this runs into minutes.
       timeoutMs: Math.min(timeoutMs, 20 * 60_000),
@@ -311,6 +327,14 @@ export async function deleteSandboxWithSnapshots(
 export async function wakeMachine(
   credentials: SandboxCredentials,
   name: string,
+  /**
+   * The environment the machine should have now, which is not necessarily the
+   * one it was created with: a sandbox's own environment is fixed at creation,
+   * so a rotated token would otherwise never reach a machine that already
+   * exists. The wake script restarts the daemon when these differ from what it
+   * last persisted.
+   */
+  env: Record<string, string> = {},
   signal?: AbortSignal,
 ): Promise<string> {
   const sandbox = await Sandbox.get({
@@ -322,6 +346,7 @@ export async function wakeMachine(
   const finished = await sandbox.runCommand({
     cmd: "bash",
     args: ["-lc", WAKE_SCRIPT],
+    env: { ...env, ...injectedKeys(env) },
     timeoutMs: 5 * 60_000,
     ...(signal === undefined ? {} : { signal }),
   });
