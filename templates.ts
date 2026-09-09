@@ -110,56 +110,43 @@ export function assertSafeEnvKey(key: string): void {
   }
 }
 
-/** Steps installing bb's own prerequisites: a C toolchain, then Node. */
-const BB_PREREQUISITE_STEPS = [
-  "apt-get update -qq",
-  "apt-get install -y -qq --no-install-recommends " +
-    "ca-certificates curl git build-essential python3 sudo",
-  "curl -fsSL https://deb.nodesource.com/setup_24.x | bash -",
-];
-
 /**
- * Steps registering GitHub's apt repo, because `gh` is not in Ubuntu's
- * archive. They only add the repo; the install itself is left to the shared
- * step below, so the refresh NodeSource already forces serves this repo too.
- */
-const GITHUB_CLI_REPO_STEPS = [
-  "mkdir -p -m 0755 /usr/share/keyrings",
-  "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg " +
-    "-o /usr/share/keyrings/githubcli-archive-keyring.gpg",
-  "chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg",
-  'echo "deb [arch=$(dpkg --print-architecture) ' +
-    'signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] ' +
-    'https://cli.github.com/packages stable main" ' +
-    "> /etc/apt/sources.list.d/github-cli.list",
-];
-
-/** Steps installing everything the repos above were added for. */
-const PACKAGE_INSTALL_STEPS = [
-  "apt-get update -qq",
-  "apt-get install -y -qq nodejs gh",
-  "rm -rf /var/lib/apt/lists/*",
-];
-
-/**
- * The groups above, in the order they run, each labelled with the comment the
- * Dockerfile carries above it. The parser strips comment lines inside a
- * continuation before the shell sees the command, so the labels cost nothing
- * at build time and name the sections in the build log, which prints the
- * generated Dockerfile verbatim.
+ * bb's prerequisites, in the order they run. Each group's comment is emitted
+ * above its steps in the Dockerfile; the parser strips those lines, so they
+ * label the build log for free.
  */
 const PREREQUISITE_GROUPS = [
   {
+    // The daemon needs Node 22.19+, and node-pty is built from source.
     comment: "A C toolchain for bb-app's node-pty, then Node for the daemon.",
-    steps: BB_PREREQUISITE_STEPS,
+    steps: [
+      "apt-get update -qq",
+      "apt-get install -y -qq --no-install-recommends " +
+        "ca-certificates curl git build-essential python3 sudo",
+      "curl -fsSL https://deb.nodesource.com/setup_24.x | bash -",
+    ],
   },
   {
     comment: "GitHub's apt repo, since `gh` is not in Ubuntu's archive.",
-    steps: GITHUB_CLI_REPO_STEPS,
+    steps: [
+      "mkdir -p -m 0755 /usr/share/keyrings",
+      "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg " +
+        "-o /usr/share/keyrings/githubcli-archive-keyring.gpg",
+      "chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg",
+      'echo "deb [arch=$(dpkg --print-architecture) ' +
+        'signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] ' +
+        'https://cli.github.com/packages stable main" ' +
+        "> /etc/apt/sources.list.d/github-cli.list",
+    ],
   },
   {
-    comment: "Everything the repos above were added for, on one refresh.",
-    steps: PACKAGE_INSTALL_STEPS,
+    // Deferred to here so both repos above are served by one refresh.
+    comment: "Everything the repos above were added for.",
+    steps: [
+      "apt-get update -qq",
+      "apt-get install -y -qq nodejs gh",
+      "rm -rf /var/lib/apt/lists/*",
+    ],
   },
 ];
 
@@ -167,23 +154,14 @@ const PREREQUISITE_GROUPS = [
  * The Dockerfile an image is built from.
  *
  * bb's prerequisites go in first so they are cached below the user's own
- * layers: Node (the host daemon needs 22.19+, and the stock Ubuntu base ships
- * none), a C toolchain, because bb-app's node-pty is a native add-on built
- * from source at enrolment, and the GitHub CLI, which agents on a machine are
- * expected to have. Baking these is most of what makes a machine created from
- * a custom image faster than one built from scratch.
- *
- * They share one RUN, split across lines for legibility: a build runs in a
- * throwaway sandbox and buildah is invoked without `--layers`, so extra layers
- * would buy no cache reuse while costing an extra `apt-get update` each — the
- * step above deletes the package lists this one would have to rebuild.
+ * layers. Baking them is most of what makes a machine created from a custom
+ * image faster than one built from scratch.
  *
  * Note build commands cannot see template env vars, which are instead injected
  * at sandbox creation time.
  */
 export function buildDockerfile(commands: string): string {
-  // Only the first step of a group carries its label, and only the last step
-  // of the last group drops the continuation that chains them all.
+  // The first step of a group carries its label; the last ends the chain.
   const steps = PREREQUISITE_GROUPS.flatMap((group) =>
     group.steps.map((step, index) => ({
       step,
