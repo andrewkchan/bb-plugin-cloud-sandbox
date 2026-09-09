@@ -118,6 +118,10 @@ from source at enrolment), and the GitHub CLI (`gh`, from GitHub's apt repo,
 since Ubuntu's archive does not carry it). A sandbox created without a
 template installs the same prerequisites at enrolment instead.
 
+Each line of a template's custom commands becomes its own image layer, since
+the registry rejects any layer over 500MB compressed. A line is therefore its
+own shell: `cd` and `export` do not carry to the next one.
+
 Nothing from a template's environment enters the image: an image is a shared
 artifact anyone able to pull it can read, so credentials are injected when a
 machine is created instead.
