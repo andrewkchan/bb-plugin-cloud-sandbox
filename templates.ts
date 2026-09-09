@@ -178,15 +178,11 @@ export function buildDockerfile(commands: string): string {
         (index === steps.length - 1 ? "" : " \\"),
     ]),
   ];
-  const trimmed = commands.trim();
-  if (trimmed !== "") {
-    // Run the user's script as one layer through a heredoc, so multi-line
-    // input needs no escaping and a failing line fails the build.
-    lines.push(
-      "RUN set -eux; \\",
-      ...trimmed.split("\n").map((line) => `    ${line}; \\`),
-      "    true",
-    );
+  // One RUN per line: the registry rejects a layer over 500 MB compressed.
+  // Each line is its own shell, so `cd` and `export` do not carry over.
+  for (const line of commands.split("\n")) {
+    const command = line.trim();
+    if (command !== "") lines.push(`RUN set -eux; ${command}`);
   }
   return lines.join("\n") + "\n";
 }
@@ -227,7 +223,9 @@ export async function buildImage(
   const stage = async (label: string, script: string): Promise<void> => {
     const finished = await sandbox.runCommand({
       cmd: "bash",
-      args: ["-lc", script],
+      // pipefail, or a piped stage reports its last command's status and a
+      // rejected `buildah push | tail` counts as a successful build.
+      args: ["-lc", `set -o pipefail; ${script}`],
       timeoutMs: Math.min(timeoutMs, 25 * 60_000),
       ...(signal === undefined ? {} : { signal }),
     });
@@ -266,9 +264,11 @@ export async function buildImage(
     // --isolation chroot is required: the default tries to create a container
     // namespace, which a microVM refuses with `mount proc to proc: Operation
     // not permitted`, failing every RUN step.
+    // --layers is required for the split above to mean anything: without it
+    // buildah commits every RUN as one squashed layer.
     await stage(
       "Build image",
-      `cd /tmp/img && buildah bud --isolation chroot -t ${registryRef} . 2>&1`,
+      `cd /tmp/img && buildah bud --layers --isolation chroot -t ${registryRef} . 2>&1`,
     );
     await stage("Push image", `buildah push ${registryRef} 2>&1 | tail -5`);
 
