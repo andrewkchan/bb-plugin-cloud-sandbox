@@ -110,6 +110,59 @@ export function assertSafeEnvKey(key: string): void {
   }
 }
 
+/** Steps installing bb's own prerequisites: a C toolchain, then Node. */
+const BB_PREREQUISITE_STEPS = [
+  "apt-get update -qq",
+  "apt-get install -y -qq --no-install-recommends " +
+    "ca-certificates curl git build-essential python3 sudo",
+  "curl -fsSL https://deb.nodesource.com/setup_24.x | bash -",
+];
+
+/**
+ * Steps registering GitHub's apt repo, because `gh` is not in Ubuntu's
+ * archive. They only add the repo; the install itself is left to the shared
+ * step below, so the refresh NodeSource already forces serves this repo too.
+ */
+const GITHUB_CLI_REPO_STEPS = [
+  "mkdir -p -m 0755 /usr/share/keyrings",
+  "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg " +
+    "-o /usr/share/keyrings/githubcli-archive-keyring.gpg",
+  "chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg",
+  'echo "deb [arch=$(dpkg --print-architecture) ' +
+    'signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] ' +
+    'https://cli.github.com/packages stable main" ' +
+    "> /etc/apt/sources.list.d/github-cli.list",
+];
+
+/** Steps installing everything the repos above were added for. */
+const PACKAGE_INSTALL_STEPS = [
+  "apt-get update -qq",
+  "apt-get install -y -qq nodejs gh",
+  "rm -rf /var/lib/apt/lists/*",
+];
+
+/**
+ * The groups above, in the order they run, each labelled with the comment the
+ * Dockerfile carries above it. The parser strips comment lines inside a
+ * continuation before the shell sees the command, so the labels cost nothing
+ * at build time and name the sections in the build log, which prints the
+ * generated Dockerfile verbatim.
+ */
+const PREREQUISITE_GROUPS = [
+  {
+    comment: "A C toolchain for bb-app's node-pty, then Node for the daemon.",
+    steps: BB_PREREQUISITE_STEPS,
+  },
+  {
+    comment: "GitHub's apt repo, since `gh` is not in Ubuntu's archive.",
+    steps: GITHUB_CLI_REPO_STEPS,
+  },
+  {
+    comment: "Everything the repos above were added for, on one refresh.",
+    steps: PACKAGE_INSTALL_STEPS,
+  },
+];
+
 /**
  * The Dockerfile an image is built from.
  *
@@ -120,29 +173,32 @@ export function assertSafeEnvKey(key: string): void {
  * expected to have. Baking these is most of what makes a machine created from
  * a custom image faster than one built from scratch.
  *
+ * They share one RUN, split across lines for legibility: a build runs in a
+ * throwaway sandbox and buildah is invoked without `--layers`, so extra layers
+ * would buy no cache reuse while costing an extra `apt-get update` each — the
+ * step above deletes the package lists this one would have to rebuild.
+ *
  * Note build commands cannot see template env vars, which are instead injected
  * at sandbox creation time.
  */
 export function buildDockerfile(commands: string): string {
+  // Only the first step of a group carries its label, and only the last step
+  // of the last group drops the continuation that chains them all.
+  const steps = PREREQUISITE_GROUPS.flatMap((group) =>
+    group.steps.map((step, index) => ({
+      step,
+      comment: index === 0 ? group.comment : undefined,
+    })),
+  );
   const lines = [
     `FROM ${BASE_IMAGE}`,
     "ENV DEBIAN_FRONTEND=noninteractive",
-    // One layer: bb's prerequisites. NodeSource and GitHub's apt repos are
-    // both registered before the second update, so one refresh serves both.
-    "RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends " +
-      "ca-certificates curl git build-essential python3 sudo && " +
-      "curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && " +
-      "mkdir -p -m 0755 /usr/share/keyrings && " +
-      "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg " +
-      "-o /usr/share/keyrings/githubcli-archive-keyring.gpg && " +
-      "chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && " +
-      "echo \"deb [arch=$(dpkg --print-architecture) " +
-      "signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] " +
-      "https://cli.github.com/packages stable main\" " +
-      "> /etc/apt/sources.list.d/github-cli.list && " +
-      "apt-get update -qq && " +
-      "apt-get install -y -qq nodejs gh && " +
-      "rm -rf /var/lib/apt/lists/*",
+    "RUN \\",
+    ...steps.flatMap(({ step, comment }, index) => [
+      ...(comment === undefined ? [] : [`    # ${comment}`]),
+      `    ${index === 0 ? "" : "&& "}${step}` +
+        (index === steps.length - 1 ? "" : " \\"),
+    ]),
   ];
   const trimmed = commands.trim();
   if (trimmed !== "") {
