@@ -178,10 +178,8 @@ export function buildDockerfile(commands: string): string {
         (index === steps.length - 1 ? "" : " \\"),
     ]),
   ];
-  // One RUN per line, because a registry layer may not exceed 500 MB
-  // compressed and a script that installs several agent CLIs clears that as
-  // one layer. Each line is therefore its own shell: `cd` and `export` do not
-  // carry to the next. A failing RUN still fails the build on its own.
+  // One RUN per line: the registry rejects a layer over 500 MB compressed.
+  // Each line is its own shell, so `cd` and `export` do not carry over.
   for (const line of commands.split("\n")) {
     const command = line.trim();
     if (command !== "") lines.push(`RUN set -eux; ${command}`);
@@ -225,9 +223,8 @@ export async function buildImage(
   const stage = async (label: string, script: string): Promise<void> => {
     const finished = await sandbox.runCommand({
       cmd: "bash",
-      // pipefail for every stage: without it a piped script reports the exit
-      // code of its last command, and `buildah push | tail` recorded a failed
-      // push as a successful build.
+      // pipefail, or a piped stage reports its last command's status and a
+      // rejected `buildah push | tail` counts as a successful build.
       args: ["-lc", `set -o pipefail; ${script}`],
       timeoutMs: Math.min(timeoutMs, 25 * 60_000),
       ...(signal === undefined ? {} : { signal }),
@@ -267,11 +264,8 @@ export async function buildImage(
     // --isolation chroot is required: the default tries to create a container
     // namespace, which a microVM refuses with `mount proc to proc: Operation
     // not permitted`, failing every RUN step.
-    //
-    // --layers is required for the one-RUN-per-line split above to mean
-    // anything: without it buildah commits every RUN as a single squashed
-    // layer, so a script installing several agent CLIs lands as one blob over
-    // the registry's 500 MB limit and the push is rejected with a 413.
+    // --layers is required for the split above to mean anything: without it
+    // buildah commits every RUN as one squashed layer.
     await stage(
       "Build image",
       `cd /tmp/img && buildah bud --layers --isolation chroot -t ${registryRef} . 2>&1`,
