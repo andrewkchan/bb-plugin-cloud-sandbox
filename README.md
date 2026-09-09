@@ -113,8 +113,10 @@ template becomes `Ready`.
 
 Every image starts from `docker.io/library/ubuntu:26.04` and installs bb's
 prerequisites first: Node (the host daemon needs 22.19+ and the stock base
-ships none) and a C toolchain (bb-app's `node-pty` is a native add-on built
-from source at enrolment).
+ships none), a C toolchain (bb-app's `node-pty` is a native add-on built
+from source at enrolment), and the GitHub CLI (`gh`, from GitHub's apt repo,
+since Ubuntu's archive does not carry it). A sandbox created without a
+template installs the same prerequisites at enrolment instead.
 
 Nothing from a template's environment enters the image: an image is a shared
 artifact anyone able to pull it can read, so credentials are injected when a

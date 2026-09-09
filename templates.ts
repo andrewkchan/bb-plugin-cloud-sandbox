@@ -115,9 +115,10 @@ export function assertSafeEnvKey(key: string): void {
  *
  * bb's prerequisites go in first so they are cached below the user's own
  * layers: Node (the host daemon needs 22.19+, and the stock Ubuntu base ships
- * none) and a C toolchain, because bb-app's node-pty is a native add-on built
- * from source at enrolment. Baking these is most of what makes a machine
- * created from a custom image faster than one built from scratch.
+ * none), a C toolchain, because bb-app's node-pty is a native add-on built
+ * from source at enrolment, and the GitHub CLI, which agents on a machine are
+ * expected to have. Baking these is most of what makes a machine created from
+ * a custom image faster than one built from scratch.
  *
  * Note build commands cannot see template env vars, which are instead injected
  * at sandbox creation time.
@@ -126,11 +127,21 @@ export function buildDockerfile(commands: string): string {
   const lines = [
     `FROM ${BASE_IMAGE}`,
     "ENV DEBIAN_FRONTEND=noninteractive",
-    // One layer: bb's prerequisites.
+    // One layer: bb's prerequisites. NodeSource and GitHub's apt repos are
+    // both registered before the second update, so one refresh serves both.
     "RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends " +
       "ca-certificates curl git build-essential python3 sudo && " +
       "curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && " +
-      "apt-get install -y -qq nodejs && " +
+      "mkdir -p -m 0755 /usr/share/keyrings && " +
+      "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg " +
+      "-o /usr/share/keyrings/githubcli-archive-keyring.gpg && " +
+      "chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && " +
+      "echo \"deb [arch=$(dpkg --print-architecture) " +
+      "signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] " +
+      "https://cli.github.com/packages stable main\" " +
+      "> /etc/apt/sources.list.d/github-cli.list && " +
+      "apt-get update -qq && " +
+      "apt-get install -y -qq nodejs gh && " +
       "rm -rf /var/lib/apt/lists/*",
   ];
   const trimmed = commands.trim();
