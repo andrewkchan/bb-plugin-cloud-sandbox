@@ -17,6 +17,23 @@ else
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential >/dev/null 2>&1
 fi
 
+# The GitHub CLI is not in Ubuntu's archive, so it comes from GitHub's own apt
+# repo. A custom image already carries it; a bare sandbox does not.
+if command -v gh >/dev/null 2>&1; then
+  echo "github cli already present; skipping apt"
+else
+  keyring=/usr/share/keyrings/githubcli-archive-keyring.gpg
+  sudo mkdir -p -m 0755 /usr/share/keyrings
+  curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
+    https://cli.github.com/packages/githubcli-archive-keyring.gpg |
+    sudo tee "$keyring" >/dev/null
+  sudo chmod go+r "$keyring"
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=$keyring] https://cli.github.com/packages stable main" |
+    sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+  sudo apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh >/dev/null 2>&1
+fi
+
 # The installer's last step registers a systemd user service and containers
 # have no systemd, so skip it. The server URL must be the bb connect tunnel
 # URL: the sandbox is on the public internet and cannot reach 127.0.0.1.

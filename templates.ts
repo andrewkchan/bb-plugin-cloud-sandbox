@@ -111,27 +111,72 @@ export function assertSafeEnvKey(key: string): void {
 }
 
 /**
+ * bb's prerequisites, in the order they run. Each group's comment is emitted
+ * above its steps in the Dockerfile; the parser strips those lines, so they
+ * label the build log for free.
+ */
+const PREREQUISITE_GROUPS = [
+  {
+    // The daemon needs Node 22.19+, and node-pty is built from source.
+    comment: "A C toolchain for bb-app's node-pty, then Node for the daemon.",
+    steps: [
+      "apt-get update -qq",
+      "apt-get install -y -qq --no-install-recommends " +
+        "ca-certificates curl git build-essential python3 sudo",
+      "curl -fsSL https://deb.nodesource.com/setup_24.x | bash -",
+    ],
+  },
+  {
+    comment: "GitHub's apt repo, since `gh` is not in Ubuntu's archive.",
+    steps: [
+      "mkdir -p -m 0755 /usr/share/keyrings",
+      "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg " +
+        "-o /usr/share/keyrings/githubcli-archive-keyring.gpg",
+      "chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg",
+      'echo "deb [arch=$(dpkg --print-architecture) ' +
+        'signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] ' +
+        'https://cli.github.com/packages stable main" ' +
+        "> /etc/apt/sources.list.d/github-cli.list",
+    ],
+  },
+  {
+    // Deferred to here so both repos above are served by one refresh.
+    comment: "Everything the repos above were added for.",
+    steps: [
+      "apt-get update -qq",
+      "apt-get install -y -qq nodejs gh",
+      "rm -rf /var/lib/apt/lists/*",
+    ],
+  },
+];
+
+/**
  * The Dockerfile an image is built from.
  *
  * bb's prerequisites go in first so they are cached below the user's own
- * layers: Node (the host daemon needs 22.19+, and the stock Ubuntu base ships
- * none) and a C toolchain, because bb-app's node-pty is a native add-on built
- * from source at enrolment. Baking these is most of what makes a machine
- * created from a custom image faster than one built from scratch.
+ * layers. Baking them is most of what makes a machine created from a custom
+ * image faster than one built from scratch.
  *
  * Note build commands cannot see template env vars, which are instead injected
  * at sandbox creation time.
  */
 export function buildDockerfile(commands: string): string {
+  // The first step of a group carries its label; the last ends the chain.
+  const steps = PREREQUISITE_GROUPS.flatMap((group) =>
+    group.steps.map((step, index) => ({
+      step,
+      comment: index === 0 ? group.comment : undefined,
+    })),
+  );
   const lines = [
     `FROM ${BASE_IMAGE}`,
     "ENV DEBIAN_FRONTEND=noninteractive",
-    // One layer: bb's prerequisites.
-    "RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends " +
-      "ca-certificates curl git build-essential python3 sudo && " +
-      "curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && " +
-      "apt-get install -y -qq nodejs && " +
-      "rm -rf /var/lib/apt/lists/*",
+    "RUN \\",
+    ...steps.flatMap(({ step, comment }, index) => [
+      ...(comment === undefined ? [] : [`    # ${comment}`]),
+      `    ${index === 0 ? "" : "&& "}${step}` +
+        (index === steps.length - 1 ? "" : " \\"),
+    ]),
   ];
   const trimmed = commands.trim();
   if (trimmed !== "") {
