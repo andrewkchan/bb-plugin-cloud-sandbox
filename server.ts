@@ -55,6 +55,54 @@ const MACHINES_CHANGED = "machines-changed";
 const TEMPLATES_CHANGED = "templates-changed";
 const AUTH_CHANGED = "auth-changed";
 const REFRESH_SKEW_MS = 60_000;
+/** Vercel's sandbox lifetime ceilings, per plan, as the setting stores them. */
+const HOBBY_TIMEOUT_SECONDS = "2700";
+const PRO_TIMEOUT_SECONDS = "86400";
+
+const teamBillingSchema = z.object({
+  billing: z.object({ plan: z.string() }),
+});
+
+/**
+ * The billing plan ("hobby", "pro", "enterprise") of the team sandboxes run
+ * in, or null if Vercel will not say. This is the same field inferScope
+ * reads to pick a team, so the sign-in token is known to be allowed to read it.
+ */
+async function fetchTeamPlan(
+  token: string,
+  teamId: string,
+): Promise<string | null> {
+  try {
+    const response = await fetch(
+      `https://api.vercel.com/v2/teams/${encodeURIComponent(teamId)}`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    if (!response.ok) return null;
+    const parsed = teamBillingSchema.safeParse(await response.json());
+    return parsed.success ? parsed.data.billing.plan : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The machine lifetime to switch to for `plan`, or null to leave the setting
+ * alone. Only a value that is still one of the plan ceilings is replaced: a
+ * custom lifetime is the user's choice, and signing in must not overwrite it.
+ */
+function timeoutForPlan(current: string, plan: string | null): string | null {
+  if (plan === null) return null;
+  const trimmed = current.trim();
+  if (
+    trimmed !== "" &&
+    trimmed !== HOBBY_TIMEOUT_SECONDS &&
+    trimmed !== PRO_TIMEOUT_SECONDS
+  ) {
+    return null;
+  }
+  const target = plan === "hobby" ? HOBBY_TIMEOUT_SECONDS : PRO_TIMEOUT_SECONDS;
+  return target === trimmed ? null : target;
+}
 
 const storedSessionSchema = z.object({
   accessToken: z.string(),
@@ -391,11 +439,12 @@ export default async function plugin(bb: BbPluginApi) {
     },
     // Vercel caps sandbox lifetime at 45 minutes on Hobby and 24 hours on
     // Pro/Enterprise; exceeding it fails sandbox creation outright. Default
-    // to the Hobby ceiling, which every plan accepts.
+    // to the Hobby ceiling, which every plan accepts; signing in raises it to
+    // the Pro ceiling when the team's plan allows (see timeoutForPlan).
     machineTimeoutSeconds: {
       type: "string",
       label: "Machine lifetime (seconds; max 2700 on Hobby, 86400 on Pro)",
-      default: "2700",
+      default: HOBBY_TIMEOUT_SECONDS,
     },
     // The environment a template injects when a machine is created, as JSON
     // keyed by template id. It lives in a secret setting so it lands in the
@@ -739,10 +788,14 @@ export default async function plugin(bb: BbPluginApi) {
     return parsed.success ? parsed.data : null;
   }
 
-  async function writeStoredSession(session: StoredSession | null) {
+  async function writeStoredSession(
+    session: StoredSession | null,
+    extra: Record<string, string> = {},
+  ) {
     await bb.sdk.plugins.updateSettings({
       pluginId: bb.pluginId,
       values: {
+        ...extra,
         vercelSession: session === null ? "" : JSON.stringify(session),
       },
     });
@@ -885,10 +938,24 @@ export default async function plugin(bb: BbPluginApi) {
           controller.signal,
         );
         const stored = await resolveScope(session);
+        const plan = await fetchTeamPlan(stored.accessToken, stored.teamId);
+        const timeout = timeoutForPlan(
+          (await settings.get()).machineTimeoutSeconds,
+          plan,
+        );
+        if (timeout !== null) {
+          bb.log.info(
+            `team plan is ${plan}; machine lifetime set to ${timeout}s`,
+          );
+        }
         pending = null;
-        // Written last: persisting while the plugin is in needs-configuration
-        // makes bb retry the load, which replaces this generation.
-        await writeStoredSession(stored);
+        // Written last, and in one write: persisting while the plugin is in
+        // needs-configuration makes bb retry the load, which replaces this
+        // generation.
+        await writeStoredSession(
+          stored,
+          timeout === null ? {} : { machineTimeoutSeconds: timeout },
+        );
       } catch (error) {
         pending = null;
         lastAuthError = error instanceof Error ? error.message : String(error);

@@ -41,7 +41,9 @@ Everything is optional and lives in the plugin's settings page.
 | `vercelSession` | — | Managed by the sign-in flow; do not edit by hand |
 
 Vercel caps sandbox lifetime at **45 minutes on Hobby** and 24 hours on
-Pro/Enterprise.
+Pro/Enterprise. When you sign in, the plugin reads the team's plan and sets
+`machineTimeoutSeconds` to that plan's ceiling (`2700` or `86400`). A custom
+value you have entered yourself is left alone.
 
 **A cloud machine is therefore not long-lived.** Vercel terminates it at that
 limit whatever it is doing, and the machine goes `Inactive`.
