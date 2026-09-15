@@ -25,10 +25,19 @@ import {
   describeSandboxError,
   stopMachine,
   wakeMachine,
+  THREAD_MACHINE_PREFIX,
   type EnrollmentDetails,
+  type MachineSandbox,
   type SandboxCredentials,
 } from "./machines.js";
 import { AGENT_PROVIDERS, type AgentCredential } from "./agents.js";
+import {
+  isThreadMachineProvider,
+  parseThreadMachineResource,
+  registerThreadMachine,
+  type ThreadMachineDeps,
+  type ThreadMachineResource,
+} from "./machine-provider.js";
 import {
   GH_TOKEN,
   GIT_AUTHOR_EMAIL,
@@ -193,6 +202,8 @@ const machineViewSchema = z.object({
   waking: z.boolean(),
   /** Name of the template this machine was created from, if any. */
   templateName: z.string().nullable(),
+  /** True for a machine bb created for a thread and will delete with it. */
+  ephemeral: z.boolean(),
   error: z.string().nullable(),
 });
 export type MachineView = z.infer<typeof machineViewSchema>;
@@ -1114,6 +1125,116 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
+  type HostEntry = Awaited<ReturnType<typeof bb.sdk.hosts.list>>[number];
+  interface ThreadMachineOwner {
+    host: HostEntry;
+    resource: ThreadMachineResource;
+  }
+
+  /**
+   * The machines bb created from this plugin's providers, keyed by the sandbox
+   * behind each one.
+   *
+   * These have no entry in the plugin's own records: bb owns them, so its host
+   * registry and the resource it persists for each are the only places that
+   * know which sandbox belongs to which machine.
+   */
+  async function threadMachineOwners(
+    hosts: HostEntry[],
+  ): Promise<Map<string, ThreadMachineOwner>> {
+    const owners = new Map<string, ThreadMachineOwner>();
+    for (const host of hosts) {
+      if (!isThreadMachineProvider(host.machineProviderId)) continue;
+      const resource = parseThreadMachineResource(
+        await bb.experimental_machines.getResource(host.id),
+      );
+      if (resource === null) continue;
+      owners.set(resource.sandboxName, { host, resource });
+    }
+    return owners;
+  }
+
+  /** The bb machine behind a sandbox name, or null for the user's own machines. */
+  async function threadMachineHostId(name: string): Promise<string | null> {
+    const owners = await threadMachineOwners(await bb.sdk.hosts.list());
+    return owners.get(name)?.host.id ?? null;
+  }
+
+  /**
+   * Rows for the machines bb made for threads.
+   *
+   * bb's lifecycle phase outranks the sandbox's own status: a machine bb has
+   * suspended reads as Suspended, not merely stopped, because that is the
+   * state its thread will resume it from.
+   */
+  async function threadMachineViews(
+    sandboxes: MachineSandbox[],
+    hosts: HostEntry[],
+    sessionStarts: Map<string, number>,
+  ): Promise<MachineView[]> {
+    const owners = await threadMachineOwners(hosts);
+    return sandboxes.flatMap((sandbox) => {
+      const owner = owners.get(sandbox.name);
+      // A sandbox bb has no machine for is bb's to sweep, and every action on
+      // one of these rows goes through bb, so there is nothing to offer.
+      if (owner === undefined) return [];
+      const { host, resource } = owner;
+      const phase = host.lifecycle.phase;
+      const sessionStartedAt = sessionStarts.get(sandbox.name) ?? null;
+      const live = sandbox.status === "running" || sandbox.status === "pending";
+      const failed = sandbox.status === "failed" || sandbox.status === "aborted";
+      const suspended = phase === "suspended" || phase === "suspending";
+      const state: MachineView["state"] = failed
+        ? "error"
+        : suspended || !live
+          ? "inactive"
+          : host.status === "connected"
+            ? "running"
+            : "connecting";
+      const uptimeMs =
+        state === "running" && sessionStartedAt !== null
+          ? Date.now() - sessionStartedAt
+          : null;
+      const status = failed
+        ? `Error (sandbox ${sandbox.status})`
+        : phase === "suspending"
+          ? "Suspending"
+          : phase === "suspended"
+            ? "Suspended"
+            : phase === "resuming"
+              ? "Resuming"
+              : phase === "removing"
+                ? "Removing"
+                : state === "running"
+                  ? uptimeMs === null
+                    ? "Running"
+                    : `Running for ${formatUptime(uptimeMs)}`
+                  : state === "connecting"
+                    ? "Connecting"
+                    : "Inactive";
+      return [
+        {
+          name: sandbox.name,
+          hostId: host.id,
+          hostName: host.name,
+          state,
+          status,
+          uptimeMs,
+          createdAt: sandbox.createdAt,
+          sessionStartedAt,
+          lastUsedAt: host.lastSeenAt ?? sandbox.updatedAt,
+          waking: waking.has(sandbox.name),
+          templateName:
+            resource.templateId === null
+              ? null
+              : (getTemplate(resource.templateId)?.name ?? null),
+          ephemeral: true,
+          error: failed ? `Sandbox ${sandbox.status}` : null,
+        },
+      ];
+    });
+  }
+
   async function describeMachines(): Promise<{
     machines: MachineView[];
     signedIn: boolean;
@@ -1149,12 +1270,14 @@ export default async function plugin(bb: BbPluginApi) {
       projectId: session.projectId,
     };
 
-    const [allSandboxes, records, hosts, dismissed] = await Promise.all([
-      listMachines(credentials),
-      readRecords(),
-      bb.sdk.hosts.list(),
-      readDismissed(),
-    ]);
+    const [allSandboxes, threadSandboxes, records, hosts, dismissed] =
+      await Promise.all([
+        listMachines(credentials),
+        listMachines(credentials, THREAD_MACHINE_PREFIX),
+        readRecords(),
+        bb.sdk.hosts.list(),
+        readDismissed(),
+      ]);
     // Vercel keeps listing stopped sandboxes forever, so a removed machine
     // only disappears because this filter hides it.
     const dismissedNames = new Set(dismissed);
@@ -1167,7 +1290,7 @@ export default async function plugin(bb: BbPluginApi) {
     // keeps this to one extra request per running machine rather than per row.
     const sessionStarts = await fetchSessionStarts(
       credentials,
-      sandboxes.filter(
+      [...sandboxes, ...threadSandboxes].filter(
         (sandbox) => sandbox.status === "running" || sandbox.status === "pending",
       ),
     );
@@ -1197,6 +1320,7 @@ export default async function plugin(bb: BbPluginApi) {
           sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
+          ephemeral: false,
           templateName: record?.templateName ?? null,
           error: `Sandbox ${sandbox.status}`,
         };
@@ -1213,6 +1337,7 @@ export default async function plugin(bb: BbPluginApi) {
           sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
+          ephemeral: false,
           templateName: record?.templateName ?? null,
           error: null,
         };
@@ -1234,6 +1359,7 @@ export default async function plugin(bb: BbPluginApi) {
           sessionStartedAt,
           lastUsedAt,
           waking: waking.has(sandbox.name),
+          ephemeral: false,
           templateName: record?.templateName ?? null,
           error: null,
         };
@@ -1249,6 +1375,7 @@ export default async function plugin(bb: BbPluginApi) {
         sessionStartedAt,
         lastUsedAt,
         waking: waking.has(sandbox.name),
+        ephemeral: false,
         templateName: record?.templateName ?? null,
         error: null,
       };
@@ -1263,7 +1390,10 @@ export default async function plugin(bb: BbPluginApi) {
     }
 
     return {
-      machines: views,
+      machines: [
+        ...views,
+        ...(await threadMachineViews(threadSandboxes, hosts, sessionStarts)),
+      ],
       signedIn: true,
       creating: creating.size > 0,
       vercelUrl: buildVercelUrl(session),
@@ -1348,19 +1478,27 @@ export default async function plugin(bb: BbPluginApi) {
     return readyTemplates[0]?.id ?? null;
   }
 
+  /** Sandbox lifetime and size from settings, with the Hobby-safe fallbacks. */
+  async function machineLimits(): Promise<{ timeoutMs: number; vcpus: number }> {
+    const values = await settings.get();
+    const seconds = Number.parseInt(values.machineTimeoutSeconds, 10);
+    const vcpus = Number.parseInt(values.machineVcpus, 10);
+    return {
+      timeoutMs:
+        Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 2_700_000,
+      vcpus: Number.isFinite(vcpus) ? vcpus : 2,
+    };
+  }
+
   async function startCreate(templateId: string | null): Promise<boolean> {
     const credentials = await requireCredentials();
-    const values = await settings.get();
     const template = templateId === null ? null : getTemplate(templateId);
     if (templateId !== null && (template === null || template.imageRef === null)) {
       throw new Error(
         `Template ${templateId} has not been built, so no machine can be created from it.`,
       );
     }
-    const seconds = Number.parseInt(values.machineTimeoutSeconds, 10);
-    const timeoutMs =
-      Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 2_700_000;
-    const vcpus = Number.parseInt(values.machineVcpus, 10);
+    const { timeoutMs, vcpus } = await machineLimits();
 
     // A new attempt supersedes whatever the last one reported.
     lastFailure = null;
@@ -1388,7 +1526,7 @@ export default async function plugin(bb: BbPluginApi) {
           env: await machineEnv(template?.id ?? null),
           ...(template?.imageRef == null ? {} : { image: template.imageRef }),
           timeoutMs,
-          vcpus: Number.isFinite(vcpus) ? vcpus : 2,
+          vcpus,
           onCreated: async (name) => {
             // The list can show a "Connecting" row from here, well before the
             // multi-minute enrollment finishes.
@@ -1438,7 +1576,11 @@ export default async function plugin(bb: BbPluginApi) {
    */
   async function startWake(name: string): Promise<boolean> {
     if (waking.has(name)) return false;
-    const credentials = await requireCredentials();
+    // A machine bb owns is resumed through bb, which restores the sandbox and
+    // restarts its daemon. The plugin's own wake script belongs to the
+    // machines it enrolled itself, and expects the supervisor those carry.
+    const threadHostId = await threadMachineHostId(name);
+    if (threadHostId === null) await requireCredentials();
     lastFailure = null;
     waking.add(name);
     invalidateMachines();
@@ -1447,24 +1589,30 @@ export default async function plugin(bb: BbPluginApi) {
     void (async () => {
       try {
         await record("wake.requested", name, "Waking machine.");
-        // The machine is handed the environment it would get if it were
-        // created now, not the one it was created with: an identity imported
-        // or a token rotated since then belongs on it too.
-        const templateId =
-          (await readRecords()).find((r) => r.name === name)?.templateId ?? null;
-        const detail = await wakeMachine(
-          credentials,
-          name,
-          await machineEnv(templateId),
-        );
-        // A resumed machine is live again, so clear the disconnect marker.
-        const records = await readRecords();
-        await writeRecords(
-          records.map((r) =>
-            r.name === name ? { ...r, disconnectedAt: null } : r,
-          ),
-        );
-        await record("machine.woken", name, detail);
+        if (threadHostId !== null) {
+          await bb.sdk.hosts.experimental_resume({ hostId: threadHostId });
+          await record("machine.woken", name, "bb resumed the machine.");
+        } else {
+          // The machine is handed the environment it would get if it were
+          // created now, not the one it was created with: an identity imported
+          // or a token rotated since then belongs on it too.
+          const templateId =
+            (await readRecords()).find((r) => r.name === name)?.templateId ??
+            null;
+          const detail = await wakeMachine(
+            await requireCredentials(),
+            name,
+            await machineEnv(templateId),
+          );
+          // A resumed machine is live again, so clear the disconnect marker.
+          const records = await readRecords();
+          await writeRecords(
+            records.map((r) =>
+              r.name === name ? { ...r, disconnectedAt: null } : r,
+            ),
+          );
+          await record("machine.woken", name, detail);
+        }
       } catch (error) {
         const failure = describeSandboxError(error);
         lastFailure = { action: "wake", ...failure, at: Date.now() };
@@ -1489,6 +1637,18 @@ export default async function plugin(bb: BbPluginApi) {
    * listed as Inactive and can be woken later.
    */
   async function stopMachineByName(name: string): Promise<boolean> {
+    const threadHostId = await threadMachineHostId(name);
+    if (threadHostId !== null) {
+      // Suspending through bb is what lets the thread resume this machine
+      // later; stopping its sandbox behind bb's back would leave bb thinking
+      // the machine is still there.
+      await record("delete.requested", name, "Stopping machine.");
+      await bb.sdk.hosts.experimental_suspend({ hostId: threadHostId });
+      await record("machine.stopped", name, "bb suspended the machine.");
+      invalidateMachines();
+      bb.realtime.publish(MACHINES_CHANGED, {});
+      return true;
+    }
     const credentials = await requireCredentials();
     await record("delete.requested", name, "Stopping machine.");
     try {
@@ -1517,6 +1677,21 @@ export default async function plugin(bb: BbPluginApi) {
    * reversible.
    */
   async function removeMachineByName(name: string): Promise<boolean> {
+    const threadHostId = await threadMachineHostId(name);
+    if (threadHostId !== null) {
+      // bb deletes the sandbox through the provider that made it, and refuses
+      // outright while a thread is still live on the machine.
+      await record("delete.requested", name, "Removing machine.");
+      await bb.sdk.hosts.delete({ hostId: threadHostId });
+      await record(
+        "machine.deleted",
+        name,
+        "bb removed the machine and its sandbox.",
+      );
+      invalidateMachines();
+      bb.realtime.publish(MACHINES_CHANGED, {});
+      return true;
+    }
     const credentials = await requireCredentials();
     await record("delete.requested", name, "Removing machine.");
     try {
@@ -1620,6 +1795,7 @@ export default async function plugin(bb: BbPluginApi) {
           "UPDATE builds SET status = 'ready', finished_at = ?, image_ref = ? WHERE id = ?",
         ).run(Date.now(), result.imageRef, buildId);
         setTemplateStatus(templateId, "ready", { imageRef: result.imageRef });
+        registerThreadMachine(bb, threadMachines, templateId);
         bb.log.info(`template ${template.name} built its image as ${result.imageRef}`);
         // Rebuilding a tag leaves the manifest it replaced untagged and full
         // size, so only the latest hash for each image is kept.
@@ -1638,6 +1814,64 @@ export default async function plugin(bb: BbPluginApi) {
     })();
     return true;
   }
+
+  // The environment picker's Cloud Machine entries: one for Vercel's default
+  // image and one per template that has built. A template built or renamed
+  // later registers again; a deleted one keeps its entry until the plugin
+  // next loads, and refuses to launch meanwhile.
+  const threadMachines: ThreadMachineDeps = {
+    credentials: optionalCredentials,
+    limits: machineLimits,
+    machineEnv,
+    template: getTemplate,
+  };
+  registerThreadMachine(bb, threadMachines, null);
+  for (const template of listTemplates()) {
+    if (template.imageRef !== null) {
+      registerThreadMachine(bb, threadMachines, template.id);
+    }
+  }
+
+  // Vercel stops a sandbox when its lifetime runs out and tells bb nothing, so
+  // bb goes on believing the machine is active and its thread fails on the
+  // next message instead of recovering. Recording the machine as suspended is
+  // what makes that message resume the sandbox and carry on: Vercel keeps the
+  // filesystem, and bb restarts the daemon when it resumes a machine.
+  bb.background.schedule(
+    "suspend-stopped-thread-machines",
+    "* * * * *",
+    async () => {
+      const credentials = await optionalCredentials();
+      if (credentials === null) return;
+      const owners = await threadMachineOwners(await bb.sdk.hosts.list());
+      if (owners.size === 0) return;
+      const live = new Set(
+        (await listMachines(credentials, THREAD_MACHINE_PREFIX))
+          .filter(
+            (sandbox) =>
+              sandbox.status === "running" || sandbox.status === "pending",
+          )
+          .map((sandbox) => sandbox.name),
+      );
+      for (const [name, owner] of owners) {
+        if (owner.host.lifecycle.phase !== "active" || live.has(name)) continue;
+        try {
+          await bb.sdk.hosts.experimental_suspend({ hostId: owner.host.id });
+          await record(
+            "machine.stopped",
+            name,
+            "Vercel stopped the sandbox; recorded as suspended so its thread can resume it.",
+          );
+        } catch (error) {
+          // Refused while the machine is provisioning a thread; the next tick
+          // tries again.
+          bb.log.warn(
+            `could not suspend ${name}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    },
+  );
 
   bb.rpc.register(rpcContract, {
     auth_status: () => describeAuth(),
@@ -1713,6 +1947,7 @@ export default async function plugin(bb: BbPluginApi) {
       bb.realtime.publish(TEMPLATES_CHANGED, {});
       const updated = getTemplate(id);
       if (updated === null) throw new Error(`No image with id ${id}`);
+      if (updated.imageRef !== null) registerThreadMachine(bb, threadMachines, id);
       return updated;
     },
     templates_delete: async ({ id }) => {

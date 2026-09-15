@@ -20,6 +20,32 @@ is currently no CLI interface.
 Create a machine from the template named on the button, or pick another from
 the chevron.
 
+## Environment picker
+
+The plugin also adds **Cloud Machine** entries to the new-thread environment
+picker: one for Vercel's default image, and one per template that has built
+(**Cloud Machine · &lt;template&gt;**). Choosing one makes bb create a fresh
+sandbox for that thread, enroll it, and check the project out on it.
+
+These machines are bb's, not the Cloud Machines page's. They are *ephemeral*:
+they never appear in the picker as a machine a new thread could run on, and bb
+removes each one a few minutes after its thread ends.
+
+They are listed on the Cloud Machines page all the same, with a clock icon
+whose tooltip says bb owns them, and a **Thread machines** filter to show only
+those. Wake, Stop and Delete on such a row go through bb — resume, suspend and
+machine removal — so bb stays the owner of the lifecycle. bb refuses to delete
+a machine whose thread is still live, and says so.
+
+**When Vercel stops one at its lifetime limit**, a once-a-minute check records
+the machine as suspended in bb. Vercel keeps the sandbox filesystem, so the
+next message in that thread resumes the sandbox, restarts the daemon and
+carries on; Wake does the same by hand.
+
+A template built or renamed while the plugin runs updates its entry at once.
+A deleted template's entry stays until the plugin next loads and refuses to
+launch meanwhile. Requires bb with Plugin SDK 0.4.88 or newer.
+
 ## Setup
 
 ```sh
@@ -62,7 +88,8 @@ bb plugin logs cloud-sandbox -f
 | File | Role |
 | --- | --- |
 | `machines.ts` | Cloud machine lifecycle: create, enrol, list, stop, wake, delete. No bb dependency. |
-| `scripts/*.sh` | What a machine runs on itself: enrolment, wake, the injected-credential file, and the daemon supervisor that stands in for the service manager a container has none of. |
+| `machine-provider.ts` | The environment picker's Cloud Machine entries: a machine provider per template that bb calls to create, suspend, resume and remove thread machines. |
+| `scripts/*.sh` | What a machine runs on itself: prerequisites, enrolment, wake, the injected-credential file, and the daemon supervisor that stands in for the service manager a container has none of. |
 | `templates.ts` | Template presets, the Dockerfile, the image build, and registry cleanup. No bb dependency. |
 | `agents.ts` | Agent providers and the values each one reads from the environment. No bb dependency. |
 | `github.ts` | Reads the host's `gh` login into the git identity every machine gets. No bb dependency. |
