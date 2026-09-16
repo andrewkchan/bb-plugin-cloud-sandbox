@@ -103,8 +103,11 @@ const SHELL_LIB = readScript("lib.sh").replace(
   () => readScript("daemon-supervisor.sh"),
 );
 
+/** Installs what bb's installer needs on a sandbox that lacks it. */
+export const PREREQUISITES_SCRIPT = readScript("prerequisites.sh");
+
 /** Enrollment takes its join code, host id, server URL and machine code as arguments. */
-export const ENROLLMENT_SCRIPT = `${SHELL_LIB}\n${readScript("enroll.sh")}`;
+export const ENROLLMENT_SCRIPT = `${SHELL_LIB}\n${PREREQUISITES_SCRIPT}\n${readScript("enroll.sh")}`;
 
 export const WAKE_SCRIPT = `${SHELL_LIB}\n${readScript("wake.sh")}`;
 
@@ -226,13 +229,14 @@ function lastMeaningfulLine(log: string): string {
   return lines[lines.length - 1] ?? "No output.";
 }
 
-/** Every plugin-managed sandbox, newest first. */
+/** Every sandbox with the given prefix, newest first. */
 export async function listMachines(
   credentials: SandboxCredentials,
+  namePrefix: string = MACHINE_NAME_PREFIX,
 ): Promise<MachineSandbox[]> {
   const paginator = await Sandbox.list({
     ...credentials,
-    namePrefix: MACHINE_NAME_PREFIX,
+    namePrefix,
     // The API rejects namePrefix unless it is sorting by name; this call
     // re-sorts by createdAt below anyway.
     sortBy: "name",
@@ -399,6 +403,98 @@ export async function fetchSessionStarts(
     }),
   );
   return new Map(entries.filter((entry) => entry !== null));
+}
+
+/**
+ * Sandboxes bb creates for a thread through the machine provider. A separate
+ * prefix keeps them off the Cloud Machines page, which lists only the machines
+ * a user created there; bb owns these and removes them with their thread.
+ */
+export const THREAD_MACHINE_PREFIX = "bb-thread-";
+
+/** The sandbox name for a machine launch key, so every retry finds the same sandbox. */
+export function threadMachineName(key: string): string {
+  return `${THREAD_MACHINE_PREFIX}${key.toLowerCase().replace(/[^a-z0-9-]/gu, "-")}`;
+}
+
+/**
+ * Get the named sandbox, creating it if it does not exist yet.
+ *
+ * Converging on a name rather than always creating is what lets a retried
+ * launch reuse the sandbox an interrupted attempt already paid for.
+ */
+export async function openThreadMachine(options: {
+  credentials: SandboxCredentials;
+  name: string;
+  env: Record<string, string>;
+  image?: string;
+  timeoutMs: number;
+  vcpus: number;
+  signal: AbortSignal;
+}): Promise<Sandbox> {
+  const { credentials, name, env, image, timeoutMs, vcpus, signal } = options;
+  return Sandbox.getOrCreate({
+    ...credentials,
+    name,
+    timeout: timeoutMs,
+    ...(Object.keys(env).length === 0 ? {} : { env }),
+    ...(image === undefined || image === "" ? {} : { image }),
+    keepLastSnapshots: { count: 1 },
+    resources: { vcpus },
+    signal,
+  });
+}
+
+/** The named sandbox, or null when Vercel has no sandbox by that name. */
+export async function findSandbox(
+  credentials: SandboxCredentials,
+  name: string,
+  options: { resume?: boolean; signal?: AbortSignal } = {},
+): Promise<Sandbox | null> {
+  try {
+    return await Sandbox.get({ ...credentials, name, ...options });
+  } catch (error) {
+    if (error instanceof APIError && error.response.status === 404) return null;
+    throw error;
+  }
+}
+
+/**
+ * Run a command with stdin, streaming its output, and return its exit code.
+ *
+ * Vercel commands take no stdin, so it travels in an environment variable
+ * that the wrapper unsets before running the command: bb's installer starts
+ * the daemon from inside that command, and the daemon must not inherit the
+ * enrollment secret the installer was handed.
+ */
+export async function execInSandbox(
+  sandbox: Sandbox,
+  request: {
+    command: string[];
+    stdin: string;
+    timeoutMs: number;
+    signal: AbortSignal;
+    onOutput: (chunk: string) => void;
+  },
+): Promise<number> {
+  const command = await sandbox.runCommand({
+    cmd: "sh",
+    args: [
+      "-c",
+      'input=$BB_EXEC_STDIN; unset BB_EXEC_STDIN; printf "%s" "$input" | "$@"',
+      "bb-exec",
+      ...request.command,
+    ],
+    env: { BB_EXEC_STDIN: request.stdin },
+    detached: true,
+    timeoutMs: request.timeoutMs,
+    signal: request.signal,
+  });
+  for await (const line of command.logs({ signal: request.signal })) {
+    request.onOutput(line.data);
+  }
+  const finished = await command.wait({ signal: request.signal });
+  return finished.exitCode;
 }
 
 /** Stop one machine's sandbox. Safe to call on an already-stopped sandbox. */

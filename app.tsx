@@ -72,7 +72,8 @@ let lastMachineSnapshot: {
 
 type SortKey = "name" | "createdAt" | "lastUsedAt";
 type SortDirection = "asc" | "desc";
-type StatusFilter = "all" | MachineView["state"];
+/** "ephemeral" filters by who owns the machine, the rest by its state. */
+type StatusFilter = "all" | "ephemeral" | MachineView["state"];
 
 const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
   { id: "all", label: "All" },
@@ -80,7 +81,34 @@ const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
   { id: "connecting", label: "Connecting" },
   { id: "inactive", label: "Inactive" },
   { id: "error", label: "Error" },
+  { id: "ephemeral", label: "Thread machines" },
 ];
+
+function matchesFilter(machine: MachineView, filter: StatusFilter): boolean {
+  if (filter === "all") return true;
+  if (filter === "ephemeral") return machine.ephemeral;
+  return machine.state === filter;
+}
+
+/**
+ * Marks a machine bb made for a thread. These are listed for visibility, but
+ * they are not machines you can start a thread on: bb places its own thread
+ * there and deletes the machine once that thread is done.
+ */
+function ThreadMachineBadge() {
+  return (
+    <span
+      className="text-muted-foreground"
+      title="Ephemeral machine: created for a thread"
+    >
+      <Icon
+        name="Clock"
+        className="size-3.5"
+        aria-label="Ephemeral machine: created for a thread"
+      />
+    </span>
+  );
+}
 
 /** Status colours are semantic, not theme accents, so they are literal hues. */
 const DOT_STYLES: Record<MachineView["state"], string> = {
@@ -282,6 +310,13 @@ function DeleteMachineDialog({
                 <li>Its snapshots are deleted, so it can never be woken</li>
                 <li>Its machine registration is removed from bb</li>
               </ul>
+              {machine?.ephemeral ? (
+                <p>
+                  bb created this machine for a thread, and refuses to delete
+                  it while that thread is still live. Whatever the thread has
+                  not committed and pushed is lost with the sandbox.
+                </p>
+              ) : null}
               <p>
                 To keep the machine so it can be woken again later, cancel and
                 use <span className="font-medium">Stop</span> instead.
@@ -501,7 +536,7 @@ function MachinesPage() {
   };
 
   const visible = (machines ?? [])
-    .filter((machine) => filter === "all" || machine.state === filter)
+    .filter((machine) => matchesFilter(machine, filter))
     .slice()
     .sort((left, right) => {
       const factor = sort.direction === "asc" ? 1 : -1;
@@ -689,10 +724,9 @@ function MachinesPage() {
 
         <div className="flex flex-wrap items-center gap-1">
           {STATUS_FILTERS.map((option) => {
-            const count =
-              option.id === "all"
-                ? (machines ?? []).length
-                : (machines ?? []).filter((m) => m.state === option.id).length;
+            const count = (machines ?? []).filter((machine) =>
+              matchesFilter(machine, option.id),
+            ).length;
             return (
               <Button
                 key={option.id}
@@ -760,8 +794,9 @@ function MachinesPage() {
                     return (
                       <TableRow key={machine.name}>
                         <TableCell className="max-w-[16rem]">
-                          <p className="truncate text-sm font-medium">
-                            {machine.name}
+                          <p className="flex items-center gap-1.5 truncate text-sm font-medium">
+                            {machine.ephemeral ? <ThreadMachineBadge /> : null}
+                            <span className="truncate">{machine.name}</span>
                           </p>
                           {machine.hostId !== null ? (
                             <p className="truncate font-mono text-xs text-muted-foreground">
