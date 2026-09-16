@@ -32,7 +32,7 @@ they never appear in the picker as a machine a new thread could run on, and bb
 removes each one a few minutes after its thread ends.
 
 They are listed on the Cloud Machines page all the same, with a clock icon
-whose tooltip says bb owns them, and a **Thread machines** filter to show only
+marking them as ephemeral, and a **Thread machines** filter to show only
 those. Wake, Stop and Delete on such a row go through bb — resume, suspend and
 machine removal — so bb stays the owner of the lifecycle. bb refuses to delete
 a machine whose thread is still live, and says so.

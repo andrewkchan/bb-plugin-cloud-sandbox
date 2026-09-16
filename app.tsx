@@ -99,9 +99,13 @@ function ThreadMachineBadge() {
   return (
     <span
       className="text-muted-foreground"
-      title="bb created this machine for a thread. It does not appear in the environment picker, and bb deletes it when its thread ends."
+      title="Ephemeral machine: created for a thread"
     >
-      <Icon name="Clock" className="size-3.5" aria-label="Thread machine" />
+      <Icon
+        name="Clock"
+        className="size-3.5"
+        aria-label="Ephemeral machine: created for a thread"
+      />
     </span>
   );
 }
