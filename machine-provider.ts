@@ -144,7 +144,7 @@ export function registerThreadMachine(
       `Check the project out on a new Vercel sandbox from ${source}.`,
       DESCRIPTION_MAX_CHARS,
     ),
-    icon: "Cloud",
+    icon: "./assets/vercel.svg",
     machineProviderId: id,
     environmentProviderId: "project-checkout",
   });
@@ -156,7 +156,7 @@ export function registerThreadMachine(
       `Create a Vercel sandbox from ${source}.`,
       DESCRIPTION_MAX_CHARS,
     ),
-    icon: "Cloud",
+    icon: "./assets/vercel.svg",
     ephemeral: true,
     async availability() {
       if ((await deps.credentials()) === null) {

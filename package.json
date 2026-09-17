@@ -10,7 +10,7 @@
     "name": "Vercel Sandboxes",
     "description": "Spin up and manage cloud machines backed by Vercel Sandboxes.",
     "branding": {
-      "icon": "Cloud"
+      "icon": "./assets/vercel.svg"
     },
     "server": "./server.ts",
     "app": "./app.tsx"

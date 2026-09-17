@@ -1657,6 +1657,21 @@ function VercelAuthSection() {
  * list. Vercel is what the plugin cannot work without; GitHub only decides
  * whether a machine can push, so neither is presented as an error.
  */
+// The Vercel mark, the same artwork as assets/vercel.svg (the plugin's
+// branding and provider icon), inlined so it can take currentColor here.
+function VercelIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 -77.5 1155 1155"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+    >
+      <path d="M577.344 0L1154.69 1000H0L577.344 0Z" />
+    </svg>
+  );
+}
+
 function AccountIndicators() {
   const rpc = useRpc<typeof rpcContract>();
   const [vercel, setVercel] = useState<AuthStatus | null>(null);
@@ -1689,7 +1704,7 @@ function AccountIndicators() {
     vercel?.state === "signed-in" && vercel.teamSlug !== null
       ? chip(
           <>
-            <Icon name="Cloud" className="size-3" aria-hidden />
+            <VercelIcon className="size-3" />
             {vercel.teamSlug}
           </>,
           `https://vercel.com/${vercel.teamSlug}`,
@@ -1697,7 +1712,7 @@ function AccountIndicators() {
         )
       : chip(
           <>
-            <Icon name="Cloud" className="size-3 opacity-40" aria-hidden />
+            <VercelIcon className="size-3 opacity-40" />
             Not logged into Vercel
           </>,
           SETTINGS_AUTH_HREF,
@@ -1988,6 +2003,10 @@ function CloudSandboxSettings() {
 }
 
 export default definePluginApp((app) => {
+  app.experimental_icons.register({
+    name: "cloud-sandbox/vercel",
+    component: VercelIcon,
+  });
   app.slots.settingsSection({
     id: "cloud-sandbox-settings",
     component: CloudSandboxSettings,
@@ -1995,7 +2014,7 @@ export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "cloud-machines",
     title: "Vercel Sandboxes",
-    icon: "Cloud",
+    icon: "cloud-sandbox/vercel",
     path: "cloud-machines",
     component: MachinesPage,
     headerContent: AccountIndicators,
