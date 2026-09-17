@@ -1,7 +1,7 @@
 // Thread machines: Vercel Sandboxes bb creates for a thread when a Cloud
 // Machine entry is chosen in the environment picker.
 //
-// Unlike the machines on the Cloud Machines page, bb owns these: it decides
+// Unlike the machines on the Vercel Sandboxes page, bb owns these: it decides
 // when one is created, suspended and removed, and enrolls each one itself
 // through the executor below. The provider is ephemeral, so a machine made for
 // a thread is never offered in the picker as a place to put another thread.
@@ -120,7 +120,7 @@ export function registerThreadMachine(
     const credentials = await deps.credentials();
     if (credentials === null) {
       throw new Error(
-        "Not signed in to Vercel. Use Sign in with Vercel on the Cloud Machines settings page.",
+        "Not signed in to Vercel. Use Sign in with Vercel on the Vercel Sandboxes settings page.",
       );
     }
     return credentials;
@@ -162,7 +162,7 @@ export function registerThreadMachine(
       if ((await deps.credentials()) === null) {
         return {
           status: "setup-required",
-          message: "Sign in with Vercel on the Cloud Machines settings page.",
+          message: "Sign in with Vercel on the Vercel Sandboxes settings page.",
         };
       }
       try {

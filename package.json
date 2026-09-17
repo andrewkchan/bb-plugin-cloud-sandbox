@@ -7,7 +7,7 @@
     "bbPluginSdk": ">=0.4.88"
   },
   "bb": {
-    "name": "Cloud Machines",
+    "name": "Vercel Sandboxes",
     "description": "Spin up and manage cloud machines backed by Vercel Sandboxes.",
     "branding": {
       "icon": "Cloud"

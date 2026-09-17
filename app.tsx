@@ -1994,7 +1994,7 @@ export default definePluginApp((app) => {
   });
   app.slots.navPanel({
     id: "cloud-machines",
-    title: "Cloud Machines",
+    title: "Vercel Sandboxes",
     icon: "Cloud",
     path: "cloud-machines",
     component: MachinesPage,

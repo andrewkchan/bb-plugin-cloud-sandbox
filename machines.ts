@@ -407,7 +407,7 @@ export async function fetchSessionStarts(
 
 /**
  * Sandboxes bb creates for a thread through the machine provider. A separate
- * prefix keeps them off the Cloud Machines page, which lists only the machines
+ * prefix keeps them off the Vercel Sandboxes page, which lists only the machines
  * a user created there; bb owns these and removes them with their thread.
  */
 export const THREAD_MACHINE_PREFIX = "bb-thread-";

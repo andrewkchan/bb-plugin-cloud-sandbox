@@ -1,13 +1,13 @@
 # bb-plugin-cloud-sandbox
 
-**Cloud Machines** — spin up and manage cloud machines backed by
+**Vercel Sandboxes** — spin up and manage cloud machines in bb, backed by
 [Vercel Sandboxes](https://vercel.com/docs/vercel-sandbox).
 
 Each cloud machine is a sandbox that installs bb and enrols itself over bb
 connect, so it appears alongside your local machines and can run threads. There
 is currently no CLI interface.
 
-- **Cloud Machines page** — a table of machines with status, created and
+- **Vercel Sandboxes page** — a table of machines with status, created and
   last-used times, sortable by name or either date and filterable by status.
   Each row shows the image it was created from and has a menu to wake, stop or
   delete it.
@@ -15,7 +15,7 @@ is currently no CLI interface.
   **Authentication** (the Vercel account, and the git identity every machine
   commits as).
 
-![The Cloud Machines page, listing machines with their status, template, and session uptime](docs/cloud-machines.png)
+![The Vercel Sandboxes page, listing machines with their status, template, and session uptime](docs/cloud-machines.png)
 
 Create a machine from the template named on the button, or pick another from
 the chevron.
@@ -27,11 +27,11 @@ picker: one for Vercel's default image, and one per template that has built
 (**Cloud Machine · &lt;template&gt;**). Choosing one makes bb create a fresh
 sandbox for that thread, enroll it, and check the project out on it.
 
-These machines are bb's, not the Cloud Machines page's. They are *ephemeral*:
+These machines are bb's, not the Vercel Sandboxes page's. They are *ephemeral*:
 they never appear in the picker as a machine a new thread could run on, and bb
 removes each one a few minutes after its thread ends.
 
-They are listed on the Cloud Machines page all the same, with a clock icon
+They are listed on the Vercel Sandboxes page all the same, with a clock icon
 marking them as ephemeral, and a **Thread machines** filter to show only
 those. Wake, Stop and Delete on such a row go through bb — resume, suspend and
 machine removal — so bb stays the owner of the lifecycle. bb refuses to delete
@@ -95,7 +95,7 @@ bb plugin logs cloud-sandbox -f
 | `github.ts` | Reads the host's `gh` login into the git identity every machine gets. No bb dependency. |
 | `auth.ts` | Vercel OAuth device authorization (RFC 8628). No bb dependency. |
 | `server.ts` | Settings, RPC, sign-in orchestration, template and machine state, debug log. |
-| `app.tsx` | The Cloud Machines page and the settings tabs. |
+| `app.tsx` | The Vercel Sandboxes page and the settings tabs. |
 
 ## Environment and credentials
 

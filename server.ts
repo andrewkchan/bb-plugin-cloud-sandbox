@@ -2,7 +2,7 @@
 //
 // A "cloud machine" is a Vercel Sandbox that has enrolled itself as a bb
 // machine, so it shows up alongside local machines and can run threads. The
-// interface is entirely graphical: a Cloud Machines page and a settings
+// interface is entirely graphical: a Vercel Sandboxes page and a settings
 // section for connecting a Vercel account over OAuth.
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -1733,7 +1733,7 @@ export default async function plugin(bb: BbPluginApi) {
   // Being signed out is deliberately NOT reported as needs-configuration. BB
   // only loads a plugin's frontend while its status is exactly "running"
   // (apps/app/src/lib/plugin-frontend.ts), so that status would remove the
-  // Cloud Machines nav entry and every other slot — including the settings
+  // Vercel Sandboxes nav entry and every other slot — including the settings
   // section holding the Sign in with Vercel button, which is the one thing a
   // signed-out user needs to reach. The page reports the signed-out state
   // itself and links to that settings tab.
