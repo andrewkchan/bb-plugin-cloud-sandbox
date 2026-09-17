@@ -22,9 +22,9 @@ the chevron.
 
 ## Environment picker
 
-The plugin also adds **Cloud Machine** entries to the new-thread environment
+The plugin also adds **Vercel Sandbox** entries to the new-thread environment
 picker: one for Vercel's default image, and one per template that has built
-(**Cloud Machine · &lt;template&gt;**). Choosing one makes bb create a fresh
+(**Vercel Sandbox · &lt;template&gt;**). Choosing one makes bb create a fresh
 sandbox for that thread, enroll it, and check the project out on it.
 
 These machines are bb's, not the Vercel Sandboxes page's. They are *ephemeral*:
@@ -88,7 +88,7 @@ bb plugin logs cloud-sandbox -f
 | File | Role |
 | --- | --- |
 | `machines.ts` | Cloud machine lifecycle: create, enrol, list, stop, wake, delete. No bb dependency. |
-| `machine-provider.ts` | The environment picker's Cloud Machine entries: a machine provider per template that bb calls to create, suspend, resume and remove thread machines. |
+| `machine-provider.ts` | The environment picker's Vercel Sandbox entries: a machine provider per template that bb calls to create, suspend, resume and remove thread machines. |
 | `scripts/*.sh` | What a machine runs on itself: prerequisites, enrolment, wake, the injected-credential file, and the daemon supervisor that stands in for the service manager a container has none of. |
 | `templates.ts` | Template presets, the Dockerfile, the image build, and registry cleanup. No bb dependency. |
 | `agents.ts` | Agent providers and the values each one reads from the environment. No bb dependency. |

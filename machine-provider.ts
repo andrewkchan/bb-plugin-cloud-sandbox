@@ -1,5 +1,5 @@
-// Thread machines: Vercel Sandboxes bb creates for a thread when a Cloud
-// Machine entry is chosen in the environment picker.
+// Thread machines: Vercel Sandboxes bb creates for a thread when a Vercel
+// Sandbox entry is chosen in the environment picker.
 //
 // Unlike the machines on the Vercel Sandboxes page, bb owns these: it decides
 // when one is created, suspended and removed, and enrolls each one itself
@@ -91,7 +91,7 @@ function sandboxExecutor(sandbox: Sandbox): MachineExecutor {
 }
 
 /**
- * Offer one Cloud Machine entry in the environment picker: a composed
+ * Offer one Vercel Sandbox entry in the environment picker: a composed
  * environment that creates a machine from this provider and checks the
  * project out on it.
  *
@@ -108,7 +108,7 @@ export function registerThreadMachine(
   const id = providerId(templateId);
   const current = templateId === null ? null : deps.template(templateId);
   const displayName = truncate(
-    current === null ? "Cloud Machine" : `Cloud Machine · ${current.name}`,
+    current === null ? "Vercel Sandbox" : `Vercel Sandbox · ${current.name}`,
     DISPLAY_NAME_MAX_CHARS,
   );
   const source =

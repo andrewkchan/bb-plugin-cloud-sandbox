@@ -1815,7 +1815,7 @@ export default async function plugin(bb: BbPluginApi) {
     return true;
   }
 
-  // The environment picker's Cloud Machine entries: one for Vercel's default
+  // The environment picker's Vercel Sandbox entries: one for Vercel's default
   // image and one per template that has built. A template built or renamed
   // later registers again; a deleted one keeps its entry until the plugin
   // next loads, and refuses to launch meanwhile.
