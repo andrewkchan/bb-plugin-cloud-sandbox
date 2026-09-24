@@ -51,6 +51,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import { RemoteComputerOverlay, RemoteComputerTab } from "./remote-computer";
 
 /** Background refresh cadence while the page is open. */
 const POLL_MS = 45_000;
@@ -2010,6 +2011,24 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "cloud-sandbox-settings",
     component: CloudSandboxSettings,
+  });
+  // The desktop's control modal covers the app, so it is an overlay rather
+  // than something inside the panel tab that opens it.
+  app.slots.experimental_appOverlay({
+    id: "remote-computer-control",
+    component: RemoteComputerOverlay,
+  });
+  // Only ever offered beside an existing thread — the slot itself never
+  // renders on the New thread screen — and re-activating it focuses the tab
+  // already open rather than opening a second one, which is the single seat
+  // the desktop has. A thread whose sandbox is not running opens the tab on
+  // an explanation instead: the slot has no way to make a row unavailable.
+  app.slots.threadPanelAction({
+    id: "open-remote-computer",
+    title: "Open remote computer",
+    icon: "Laptop",
+    layout: "flush",
+    component: RemoteComputerTab,
   });
   app.slots.navPanel({
     id: "cloud-machines",

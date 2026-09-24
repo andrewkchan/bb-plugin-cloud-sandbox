@@ -140,11 +140,22 @@ const PREREQUISITE_GROUPS = [
     ],
   },
   {
-    // Deferred to here so both repos above are served by one refresh.
-    comment: "Everything the repos above were added for.",
+    // Deferred to here so both repos above are served by one refresh, and the
+    // desktop rides along on it rather than paying for a third.
+    comment: "Everything the repos above were added for, plus the desktop.",
     steps: [
       "apt-get update -qq",
       "apt-get install -y -qq nodejs gh",
+      // The remote desktop the Open remote computer action connects to: an X
+      // display, a window manager, a taskbar, a terminal, the VNC server and
+      // the WebSocket bridge. Kept in step with scripts/desktop-packages.sh,
+      // which installs the same set on a sandbox whose image predates this.
+      "apt-get install -y -qq --no-install-recommends " +
+        "xvfb x11vnc openbox tint2 xterm x11-utils x11-xserver-utils",
+      // Braced so the fallback belongs to this step alone rather than to the
+      // && chain the steps are joined into.
+      "{ apt-get install -y -qq --no-install-recommends websockify " +
+        "|| apt-get install -y -qq --no-install-recommends python3-websockify; }",
       "rm -rf /var/lib/apt/lists/*",
     ],
   },
