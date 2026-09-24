@@ -31,6 +31,7 @@ import {
   type SandboxCredentials,
 } from "./machines.js";
 import { AGENT_PROVIDERS, type AgentCredential } from "./agents.js";
+import { openDesktop, registerDesktopSocket } from "./desktop.js";
 import {
   isThreadMachineProvider,
   parseThreadMachineResource,
@@ -57,6 +58,9 @@ import {
   pruneUntaggedImages,
   type RegistryCleanupResult,
 } from "./templates.js";
+
+/** Ceiling for one desktop open, which installs packages the first time. */
+const DESKTOP_OPEN_TIMEOUT_MS = 10 * 60_000;
 
 /** Debug events kept for troubleshooting. Bounded to stay under the kv cap. */
 const MAX_EVENTS = 200;
@@ -262,6 +266,19 @@ const buildSchema = z.object({
 });
 export type PluginBuild = z.infer<typeof buildSchema>;
 
+/**
+ * Whether a thread's machine can show a desktop right now.
+ *
+ * `reason` is written for the panel to display as-is: every unavailable case
+ * is one the user can act on (submit the thread, wake the machine, choose a
+ * Vercel Sandbox environment).
+ */
+const desktopStatusSchema = z.object({
+  available: z.boolean(),
+  reason: z.string().nullable(),
+});
+export type DesktopStatus = z.infer<typeof desktopStatusSchema>;
+
 export const rpcContract = defineRpcContract({
   auth_status: { input: z.null(), output: authStatusSchema },
   auth_start: { input: z.null(), output: authStatusSchema },
@@ -421,6 +438,32 @@ export const rpcContract = defineRpcContract({
   build_log: {
     input: z.object({ id: z.string() }),
     output: z.object({ log: z.string() }),
+  },
+  /**
+   * Whether this thread can show a remote desktop, for the panel action to
+   * decide with before it opens anything.
+   */
+  desktop_status: { input: z.object({ threadId: z.string() }), output: desktopStatusSchema },
+  /**
+   * Start the desktop and hand back one ticket for this plugin's WebSocket
+   * route. The sandbox's own hostname never leaves the server.
+   */
+  desktop_open: {
+    input: z.object({ threadId: z.string() }),
+    output: z.object({
+      status: desktopStatusSchema,
+      /** Null whenever `status.available` is false. */
+      session: z
+        .object({
+          ticket: z.string(),
+          password: z.string(),
+          width: z.number(),
+          height: z.number(),
+          /** App-relative path of the socket to open, ticket included. */
+          socketPath: z.string(),
+        })
+        .nullable(),
+    }),
   },
   events_list: {
     input: z.null(),
@@ -1161,6 +1204,108 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /**
+   * The sandbox behind a thread, or why there is not one.
+   *
+   * A thread reaches a sandbox two ways: through a machine bb created for it
+   * from this plugin's environment entry, or by running on one of the
+   * machines the Vercel Sandboxes page made. Both end at a host, so both are
+   * resolved through one.
+   *
+   * Every rejection here is a sentence the panel shows the user, so each one
+   * names what is missing rather than reporting that something was null.
+   */
+  async function threadSandbox(
+    threadId: string,
+  ): Promise<{ sandboxName: string } | { reason: string }> {
+    const thread = await bb.sdk.threads.get({ threadId });
+    if (thread.environmentId === null) {
+      return {
+        reason:
+          "This thread has not started yet. Send a message to create its sandbox first.",
+      };
+    }
+    const environment = await bb.sdk.environments.get({
+      environmentId: thread.environmentId,
+    });
+    const host =
+      (await bb.sdk.hosts.list()).find((entry) => entry.id === environment.hostId) ??
+      null;
+    if (host === null) {
+      return { reason: "This thread's machine is no longer registered with bb." };
+    }
+    if (host.status !== "connected") {
+      return {
+        reason:
+          "This thread's sandbox is not running. Wake it from the Vercel Sandboxes page, or send the thread a message.",
+      };
+    }
+
+    if (isThreadMachineProvider(host.machineProviderId)) {
+      const resource = parseThreadMachineResource(
+        await bb.experimental_machines.getResource(host.id),
+      );
+      if (resource === null) {
+        return { reason: "This thread's machine has no sandbox yet." };
+      }
+      return { sandboxName: resource.sandboxName };
+    }
+
+    const record = (await readRecords()).find((entry) => entry.hostId === host.id);
+    if (record === null || record === undefined) {
+      return { reason: "This thread does not run on a Vercel Sandbox." };
+    }
+    return { sandboxName: record.name };
+  }
+
+  async function describeDesktop(threadId: string): Promise<DesktopStatus> {
+    try {
+      const target = await threadSandbox(threadId);
+      return "reason" in target
+        ? { available: false, reason: target.reason }
+        : { available: true, reason: null };
+    } catch (error) {
+      return {
+        available: false,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
+   * Start the thread's desktop and mint the ticket its panel connects with.
+   *
+   * The first call on a sandbox can take minutes — it may be installing the
+   * desktop on an image built before this plugin had one — so the panel is
+   * told to expect a slow first answer rather than being given a timeout to
+   * race.
+   */
+  async function openThreadDesktop(threadId: string) {
+    const target = await threadSandbox(threadId);
+    if ("reason" in target) {
+      return {
+        status: { available: false, reason: target.reason },
+        session: null,
+      };
+    }
+    const session = await openDesktop({
+      credentials: await requireCredentials(),
+      sandboxName: target.sandboxName,
+      signal: AbortSignal.timeout(DESKTOP_OPEN_TIMEOUT_MS),
+      onOutput: (chunk) => bb.log.debug(`desktop ${target.sandboxName}: ${chunk.trim()}`),
+    });
+    return {
+      status: { available: true, reason: null },
+      session: {
+        ticket: session.ticket,
+        password: session.password,
+        width: session.width,
+        height: session.height,
+        socketPath: `/api/v1/plugins/${bb.pluginId}/http/desktop?ticket=${encodeURIComponent(session.ticket)}`,
+      },
+    };
+  }
+
+  /**
    * Rows for the machines bb made for threads.
    *
    * bb's lifecycle phase outranks the sandbox's own status: a machine bb has
@@ -1873,6 +2018,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
   );
 
+  registerDesktopSocket(bb);
+
   bb.rpc.register(rpcContract, {
     auth_status: () => describeAuth(),
     auth_start: () => startSignIn(),
@@ -2082,6 +2229,8 @@ export default async function plugin(bb: BbPluginApi) {
       const row = db.prepare("SELECT log FROM builds WHERE id = ?").get(id);
       return { log: row === undefined ? "" : ((row as { log: string }).log ?? "") };
     },
+    desktop_status: ({ threadId }) => describeDesktop(threadId),
+    desktop_open: ({ threadId }) => openThreadDesktop(threadId),
     events_list: async () => ({ events: await readEvents() }),
     events_clear: async () => {
       const cleared = (await readEvents()).length;

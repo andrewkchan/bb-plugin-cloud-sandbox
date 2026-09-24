@@ -46,6 +46,38 @@ A template built or renamed while the plugin runs updates its entry at once.
 A deleted template's entry stays until the plugin next loads and refuses to
 launch meanwhile. Requires bb with Plugin SDK 0.4.88 or newer.
 
+## Remote computer
+
+A thread running on a Vercel Sandbox can be watched and driven: **Open remote
+computer** in the thread panel's new-tab Actions list shows the sandbox's
+desktop at the panel's full width, and hovering it offers **Click to control**,
+which puts the desktop over the whole app and hands it the keyboard and mouse.
+**ESC** gives them back.
+
+The desktop is an X display, openbox, a tint2 taskbar and a terminal —
+deliberately minimal, so what else is worth looking at is whatever the thread
+installed. The taskbar is what a minimized window comes back from, and
+right-clicking the desktop opens a menu with a terminal and the window list.
+
+Every image the plugin builds carries these packages, and so does every
+sandbox enrolled since they were added, so opening the desktop usually just
+starts an X display and a VNC server. A sandbox created before that installs
+them on its first open, which is the case that takes minutes.
+
+Nothing about it is reachable from outside the sandbox without the password:
+the VNC server listens on loopback, and the only exposed port is a WebSocket
+bridge whose frames this plugin's server relays to the panel. The sandbox's
+public hostname and the password stay on the server; the panel is given a
+one-shot ticket for the plugin's own socket instead.
+
+There is one desktop per sandbox and so one seat. Activating the action again
+focuses the tab already open rather than opening a second, and a client
+connecting from another BB window takes the seat, closing the older one.
+
+A thread whose sandbox is not running opens the tab on an explanation of what
+to do about it — the panel launcher has no way to offer a row conditionally,
+so the check happens when the tab opens rather than before it appears.
+
 ## Setup
 
 ```sh
@@ -89,13 +121,15 @@ bb plugin logs cloud-sandbox -f
 | --- | --- |
 | `machines.ts` | Cloud machine lifecycle: create, enrol, list, stop, wake, delete. No bb dependency. |
 | `machine-provider.ts` | The environment picker's Vercel Sandbox entries: a machine provider per template that bb calls to create, suspend, resume and remove thread machines. |
-| `scripts/*.sh` | What a machine runs on itself: prerequisites, enrolment, wake, the injected-credential file, and the daemon supervisor that stands in for the service manager a container has none of. |
+| `scripts/*.sh` | What a machine runs on itself: prerequisites, enrolment, wake, the remote desktop, the injected-credential file, and the daemon supervisor that stands in for the service manager a container has none of. |
 | `templates.ts` | Template presets, the Dockerfile, the image build, and registry cleanup. No bb dependency. |
 | `agents.ts` | Agent providers and the values each one reads from the environment. No bb dependency. |
 | `github.ts` | Reads the host's `gh` login into the git identity every machine gets. No bb dependency. |
 | `auth.ts` | Vercel OAuth device authorization (RFC 8628). No bb dependency. |
 | `server.ts` | Settings, RPC, sign-in orchestration, template and machine state, debug log. |
 | `app.tsx` | The Vercel Sandboxes page and the settings tabs. |
+| `desktop.ts` | The remote desktop: exposing the sandbox's bridge port, starting the desktop, and relaying its WebSocket to the panel. |
+| `remote-computer.tsx` | The desktop's panel tab and the control modal, sharing one noVNC session. |
 
 ## Environment and credentials
 

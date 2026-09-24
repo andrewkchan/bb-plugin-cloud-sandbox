@@ -103,8 +103,18 @@ const SHELL_LIB = readScript("lib.sh").replace(
   () => readScript("daemon-supervisor.sh"),
 );
 
+/** Installs the remote desktop's packages on a sandbox that lacks them. */
+const DESKTOP_PACKAGES_SCRIPT = readScript("desktop-packages.sh");
+
 /** Installs what bb's installer needs on a sandbox that lacks it. */
-export const PREREQUISITES_SCRIPT = readScript("prerequisites.sh");
+export const PREREQUISITES_SCRIPT = `${readScript("prerequisites.sh")}\n${DESKTOP_PACKAGES_SCRIPT}`;
+
+/**
+ * Brings a sandbox's remote desktop up, taking a VNC password and a geometry
+ * as arguments. Carries the package install so a sandbox created before the
+ * desktop existed, or from an image built without it, still opens.
+ */
+export const DESKTOP_SCRIPT = `${DESKTOP_PACKAGES_SCRIPT}\n${readScript("desktop.sh")}`;
 
 /** Enrollment takes its join code, host id, server URL and machine code as arguments. */
 export const ENROLLMENT_SCRIPT = `${SHELL_LIB}\n${PREREQUISITES_SCRIPT}\n${readScript("enroll.sh")}`;
