@@ -79,12 +79,13 @@ export interface MachineSandbox {
 /**
  * Read one of the shell scripts a machine runs. They are real files under
  * scripts/ so they can be linted and read on their own; bb loads this plugin
- * either from source or from dist/server.js, so find the plugin root by its
- * package.json rather than guessing how deep this module sits.
+ * either from source or from dist/server.js, so walk up until scripts/<name>
+ * turns up rather than guessing how deep this module sits. (Not package.json:
+ * newer builds write one into dist/ too.)
  */
 function readScript(name: string): string {
   let dir = dirname(fileURLToPath(import.meta.url));
-  while (!existsSync(join(dir, "package.json"))) {
+  while (!existsSync(join(dir, "scripts", name))) {
     const parent = dirname(dir);
     if (parent === dir) throw new Error(`cannot locate scripts/${name}`);
     dir = parent;
